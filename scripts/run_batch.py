@@ -19,13 +19,11 @@ from pathlib import Path
 
 
 def _init_worker(threads_per_worker: int) -> None:
-    """Set thread-count env vars before any library is imported in this worker."""
-    import os
-    t = str(threads_per_worker)
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
-                "OPENMM_CPU_THREADS"):
-        os.environ[var] = t
+    """Set thread env vars and pre-build the base OpenMM ForceField for this worker."""
+    from protonator.minimize import _init_worker_ff
+    _init_worker_ff(threads_per_worker)
+    # gaff_xml not passed: ligands may differ per target, so the LIG template
+    # must not be pre-loaded (avoid template cache poisoning across structures).
 
 
 def _process_target(args: tuple) -> tuple[str, str | None]:

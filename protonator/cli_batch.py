@@ -11,7 +11,7 @@ from rich.progress import track
 from rdkit import Chem, RDLogger
 RDLogger.DisableLog("rdApp.*")
 
-from protonator.minimize import minimize_complex, minimize_apo
+from protonator.minimize import minimize_complex, minimize_apo, _init_worker_ff
 from protonator.ligand import prepare_ligand, LigandParams
 
 app = typer.Typer(add_completion=False)
@@ -81,7 +81,7 @@ def protonate_batch(
                 "tolerance": tolerance,
                 "max_iterations": max_iterations
             })
-        with Pool(n_workers, initializer=_init_worker, initargs=(1,)) as pool:
+        with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
             for _ in track(pool.imap_unordered(minimize_apo_pool, inputs), total=len(inputs), description=f"Running apo energy minimization…"):
                 pass
     else:
@@ -108,7 +108,9 @@ def protonate_batch(
                 "recompute_ligand": recompute_ligand
             })
 
-        # Launch parallel workers
-        with Pool(n_workers, initializer=_init_worker, initargs=(1,)) as pool:
+        # Launch parallel workers; pass gaff_xml so each worker pre-loads the
+        # LIG template once at init instead of re-reading ff14SB.xml per call.
+        gaff_xml = ligand_params.gaff_xml if not recompute_ligand else None
+        with Pool(n_workers, initializer=_init_worker_ff, initargs=(1, gaff_xml)) as pool:
             for _ in track(pool.imap_unordered(minimize_complex_pool, inputs), total=len(inputs), description=f"Running ligand-bound energy minimization…"):
                 pass

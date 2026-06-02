@@ -22,6 +22,14 @@ from .ligand import LigandParams, prepare_ligand
 
 _BACKBONE = {"N", "CA", "C", "O", "OXT"}
 
+# Worker-level cached ForceField, set once by _init_worker_ff().
+# _WORKER_FF_HAS_LIG is True when the LIG template was pre-loaded via
+# loadFile (same-ligand batch) — safe to reuse across calls.
+# If False (varying-ligand batch), only apo paths reuse the base FF;
+# holo paths build a fresh FF per call to avoid template cache poisoning.
+_WORKER_FF = None
+_WORKER_FF_HAS_LIG = False
+
 
 def minimize_complex(
     pdb_path: str | Path,
@@ -72,7 +80,6 @@ def minimize_complex(
     # ------------------------------------------------------------------
     pdb_text = pdb_path.read_text()
     protein_text = _extract_chain(pdb_text, "A")
-    ligand_text  = _extract_chain(pdb_text, "B")
 
     # ------------------------------------------------------------------
     # 2. Load protein (no H) + ligand into OpenMM
@@ -90,10 +97,15 @@ def minimize_complex(
     # 3. Build force field (needed before addHydrogens so it can evaluate
     #    H-bond geometry for His tautomer selection)
     # ------------------------------------------------------------------
-    ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
-    ff.registerTemplateGenerator(
-        make_gaff2_generator(ligand_params.gaff_xml, lig_resname="LIG")
-    )
+    if _WORKER_FF is not None and _WORKER_FF_HAS_LIG:
+        # FF was pre-built at worker init with the LIG template already loaded
+        # via loadFile — skip the expensive XML reads and GAFF registration.
+        ff = _WORKER_FF
+    else:
+        ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+        ff.registerTemplateGenerator(
+            make_gaff2_generator(ligand_params.gaff_xml, lig_resname="LIG")
+        )
 
     # ------------------------------------------------------------------
     # 4. Combine and add protein hydrogens
@@ -183,7 +195,7 @@ def minimize_apo(
     pdb_stream = io.StringIO(_ensure_oxt(protein_text))
     prot_pdb = app.PDBFile(pdb_stream)
 
-    ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+    ff = _WORKER_FF if _WORKER_FF is not None else app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
 
     modeller = app.Modeller(prot_pdb.topology, prot_pdb.positions)
     modeller.addHydrogens(ff, pH=ph)
@@ -218,6 +230,33 @@ def minimize_apo(
     state = sim.context.getState(getPositions=True)
     with open(output_path, "w") as fh:
         app.PDBFile.writeFile(modeller.topology, state.getPositions(), fh)
+
+
+# ---------------------------------------------------------------------------
+# Worker initializer
+# ---------------------------------------------------------------------------
+
+def _init_worker_ff(threads_per_worker: int, gaff_xml: str | None = None) -> None:
+    """
+    Pool initializer: set thread env vars and pre-build the OpenMM ForceField.
+
+    Pass gaff_xml (from LigandParams.gaff_xml) when all batch structures share
+    the same ligand — the LIG template is pre-loaded via ForceField.loadFile()
+    so minimize_complex() can reuse the FF object without reading ff14SB.xml or
+    parsing GAFF output on every call.
+
+    Omit gaff_xml when ligands vary per structure (run_batch.py path): the base
+    FF is still cached for apo minimisations, but minimize_complex() builds a
+    fresh FF per call to avoid template cache poisoning across different ligands.
+    """
+    from protonator.initialize import _init_worker
+    _init_worker(threads_per_worker)
+
+    global _WORKER_FF, _WORKER_FF_HAS_LIG
+    _WORKER_FF = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+    if gaff_xml is not None:
+        _WORKER_FF.loadFile(io.StringIO(gaff_xml))
+        _WORKER_FF_HAS_LIG = True
 
 
 # ---------------------------------------------------------------------------
