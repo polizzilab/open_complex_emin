@@ -9,7 +9,7 @@ From: ubuntu:22.04
 %environment
     # ambertools conda env  → antechamber, parmchk2
     # project .venv         → protonator and all Python deps
-    export PATH="/opt/miniforge3/envs/ambertools/bin:/opt/open_complex_emin/00_simple/.venv/bin:/opt/miniforge3/bin:$PATH"
+    export PATH="/opt/miniforge3/envs/ambertools/bin:/opt/open_complex_emin/.venv/bin:/opt/miniforge3/bin:$PATH"
     export CONDA_DEFAULT_ENV=base
 
 %post
@@ -51,13 +51,13 @@ From: ubuntu:22.04
         https://github.com/polizzilab/open_complex_emin.git \
         /opt/open_complex_emin
 
-    cd /opt/open_complex_emin/00_simple
+    cd /opt/open_complex_emin
     uv python install 3.12
     uv sync
     bash scripts/install_openff.sh
 
     # Tidy up pip/uv caches
-    /opt/open_complex_emin/00_simple/.venv/bin/pip cache purge 2>/dev/null || true
+    /opt/open_complex_emin/.venv/bin/pip cache purge 2>/dev/null || true
 
 %runscript
     exec protonator "$@"
@@ -78,3 +78,5 @@ From: ubuntu:22.04
 
         # Python API / arbitrary commands:
         singularity exec protonator.sif python -c "from protonator.ligand import prepare_ligand"
+
+    Source: https://github.com/polizzilab/open_complex_emin
