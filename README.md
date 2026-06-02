@@ -30,14 +30,12 @@ cd 00_simple
 #    openmm, rdkit, tblite, and all other runtime deps)
 conda env create -f environment.yml
 
-# 2. Install this package into the environment
+# 2. Install openmmforcefields and this package (--no-deps: conda already
+#    provides all runtime dependencies; avoids pulling yanked PyPI packages)
 conda activate protonator
+pip install --no-deps openmmforcefields
 pip install -e . --no-deps
 ```
-
-That's it — `antechamber`/`parmchk2` (AmberTools), `openff-toolkit`, `openmm`,
-`rdkit`, and `tblite` are all installed by `conda env create`. Run `pip install`
-with `--no-deps` because conda already provides every dependency.
 
 ### Singularity container
 

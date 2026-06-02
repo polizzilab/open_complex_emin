@@ -26,8 +26,3 @@ dependencies:
   - pip
   - pip:
       - python-constraint
-      # openmmforcefields is pure-Python; install with --no-deps so pip does
-      # not pull the yanked PyPI openff-toolkit. Its runtime deps (openff
-      # toolkit, parmed, ambertools) are already provided by conda above.
-      - --no-deps
-      - openmmforcefields

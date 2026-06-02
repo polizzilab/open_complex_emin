@@ -43,6 +43,10 @@ From: ubuntu:22.04
 
     conda env create -f /opt/open_complex_emin/environment.yml -n protonator
 
+    # openmmforcefields is pure-Python; --no-deps prevents pip from pulling the
+    # yanked PyPI openff-toolkit (its runtime deps are already in the conda env)
+    /opt/miniforge3/envs/protonator/bin/pip install --no-deps openmmforcefields
+
     # Install the protonator package itself into the env (deps already present)
     /opt/miniforge3/envs/protonator/bin/pip install --no-deps \
         /opt/open_complex_emin
