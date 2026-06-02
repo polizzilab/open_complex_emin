@@ -1,0 +1,110 @@
+Bootstrap: docker
+From: ubuntu:22.04
+
+%labels
+    Maintainer polizzilab
+    Description open_complex_emin — protein-ligand protonation and energy minimisation
+    Source https://github.com/polizzilab/open_complex_emin
+
+%environment
+    export PATH="/opt/miniforge3/bin:$PATH"
+    export CONDA_DEFAULT_ENV=base
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+
+    # -----------------------------------------------------------------------
+    # System packages
+    # -----------------------------------------------------------------------
+    apt-get update -qq && apt-get install -y -q --no-install-recommends \
+        wget git build-essential ca-certificates libssl-dev \
+        && rm -rf /var/lib/apt/lists/*
+
+    # -----------------------------------------------------------------------
+    # Miniforge3 (fresh install in container — not the host miniforge)
+    # -----------------------------------------------------------------------
+    wget -q \
+        "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh" \
+        -O /tmp/miniforge.sh
+    bash /tmp/miniforge.sh -b -p /opt/miniforge3
+    rm /tmp/miniforge.sh
+    export PATH="/opt/miniforge3/bin:$PATH"
+
+    # -----------------------------------------------------------------------
+    # Python 3.12 + AmberTools (antechamber, parmchk2) via conda-forge
+    # -----------------------------------------------------------------------
+    conda install -y -n base -c conda-forge python=3.12 ambertools
+    conda clean -y --all
+
+    # -----------------------------------------------------------------------
+    # Pip dependencies (from pyproject.toml)
+    # -----------------------------------------------------------------------
+    pip install --no-cache-dir \
+        "cachetools>=5.0" \
+        "lxml>=5.0" \
+        "networkx>=3.0" \
+        "openmm>=8.5.1" \
+        "openmmforcefields>=0.15.1" \
+        "packaging>=23.0" \
+        "parmed>=4.0" \
+        "pint>=0.23" \
+        "prody>=2.4" \
+        "python-constraint>=1.4" \
+        "rdkit>=2026.3.2" \
+        "tblite>=0.6" \
+        "tinydb>=4.0" \
+        "typer>=0.12"
+
+    # -----------------------------------------------------------------------
+    # openff stack — not on PyPI; install from GitHub source.
+    # Patches out versioningit (requires git history) and pins a static version.
+    # -----------------------------------------------------------------------
+    _patch_and_install() {
+        local url="$1"
+        local dst="/tmp/$(basename $url .git)"
+        git clone --quiet --depth 1 "$url" "$dst"
+        python3 - "$dst/pyproject.toml" << 'PYEOF'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+c = p.read_text()
+c = re.sub(r'"versioningit[^"]*"', '""', c)
+c = re.sub(r'"setuptools-scm[^"]*"', '""', c)
+c = re.sub(r'\ndynamic\s*=\s*\[.*?"version".*?\]', '\nversion = "0.0.1"',
+           c, flags=re.DOTALL)
+p.write_text(c)
+PYEOF
+        pip install --no-cache-dir --no-deps "$dst"
+        rm -rf "$dst"
+    }
+
+    _patch_and_install https://github.com/openforcefield/openff-utilities.git
+    _patch_and_install https://github.com/openforcefield/openff-units.git
+    _patch_and_install https://github.com/openforcefield/openff-toolkit.git
+
+    # -----------------------------------------------------------------------
+    # Install protonator from GitHub
+    # -----------------------------------------------------------------------
+    git clone --depth 1 \
+        https://github.com/polizzilab/open_complex_emin.git \
+        /opt/open_complex_emin
+    pip install --no-cache-dir /opt/open_complex_emin/00_simple
+
+    pip cache purge
+
+%runscript
+    exec protonator "$@"
+
+%help
+    Protein-ligand protonation and energy minimisation pipeline.
+
+    Usage:
+        # Holo (protein + ligand):
+        singularity run protonator.sif input.pdb --ligand-file ligand.sdf --output-dir out/
+        singularity run protonator.sif input.pdb --smiles "CC(=O)O" --output-dir out/
+
+        # Apo (protein only):
+        singularity run protonator.sif input.pdb --apo --output-dir out/
+
+    Or call specific executables:
+        singularity exec protonator.sif protonator --help
+        singularity exec protonator.sif python -c "from protonator.ligand import prepare_ligand"
