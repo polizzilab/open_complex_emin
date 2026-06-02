@@ -57,7 +57,7 @@ def _process_target(args: tuple) -> tuple[str, str | None]:
             from protonator.ligand import prepare_ligand
             from protonator.minimize import minimize_complex
             ligand_params = prepare_ligand(str(sdf), is_file=True)
-            minimize_complex(pdb, ligand_params, out)
+            minimize_complex(pdb, ligand_params, out, tolerance=30.0)
             return name, None
         except Exception:
             return name, traceback.format_exc()

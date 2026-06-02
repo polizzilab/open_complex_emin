@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 
 _BOHR_PER_ANG = 1.8897259886
 

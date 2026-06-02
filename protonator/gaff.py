@@ -12,6 +12,8 @@ from io import StringIO
 
 import numpy as np
 from rdkit import Chem
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 
 
 def build_gaff2_ffxml(rdmol: Chem.Mol, charges: list[float]) -> str:

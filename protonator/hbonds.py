@@ -18,6 +18,8 @@ from typing import Optional
 import numpy as np
 import prody as pr
 from rdkit import Chem
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 
 # ---------------------------------------------------------------------------
 # Constants  (from bunsalyze/utils/constants.py)
