@@ -34,7 +34,12 @@ class LigandParams:
         return len(self.charges)
 
 
-def prepare_ligand(mol_source: str, *, is_file: bool = False) -> LigandParams:
+def prepare_ligand(
+    mol_source: str,
+    *,
+    is_file: bool = False,
+    pdb_ligand_block: str | None = None,
+) -> LigandParams:
     """
     Compute GFN2-xTB partial charges and GAFF2 parameters for the ligand.
 
@@ -44,12 +49,16 @@ def prepare_ligand(mol_source: str, *, is_file: bool = False) -> LigandParams:
         SMILES string, or path to a .sdf / .mol file when is_file=True.
     is_file:
         Treat mol_source as a file path.
+    pdb_ligand_block:
+        Optional PDB block (string) for the ligand extracted from the input
+        structure.  When provided alongside a SMILES string, bond orders from
+        the SMILES are assigned onto the PDB coordinates via
+        AssignBondOrdersFromTemplate.  This preserves the AF3-predicted 3-D
+        pose while getting correct bond orders — preferred over generating a
+        fresh conformer from SMILES alone.
 
     Notes
     -----
-    When loading from a file the 3-D coordinates are used as-is.
-    When loading from SMILES a conformer is generated via ETKDGv3 + MMFF94.
-
     Both the xTB charge calculation (tblite) and the GAFF2 parameterisation
     (antechamber subprocess via openmmforcefields) run here.  Call this once
     per ligand identity and reuse the result across all structures.
@@ -59,6 +68,26 @@ def prepare_ligand(mol_source: str, *, is_file: bool = False) -> LigandParams:
         if mol is None:
             raise ValueError(f"Could not parse mol file: {mol_source}")
         smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
+    elif pdb_ligand_block is not None:
+        # Use the PDB conformer coordinates + SMILES bond orders
+        pdb_mol = Chem.MolFromPDBBlock(pdb_ligand_block, removeHs=False, sanitize=False)
+        if pdb_mol is None:
+            raise ValueError("Could not parse ligand PDB block.")
+        template = Chem.MolFromSmiles(mol_source)
+        if template is None:
+            raise ValueError(f"Could not parse SMILES: {mol_source}")
+        try:
+            mol = AllChem.AssignBondOrdersFromTemplate(template, pdb_mol)
+            Chem.SanitizeMol(mol)
+        except Exception as e:
+            raise ValueError(
+                f"AssignBondOrdersFromTemplate failed — SMILES may not match "
+                f"the ligand in the PDB: {e}"
+            ) from e
+        # Add any missing hydrogens with 3-D coordinates derived from the
+        # existing heavy-atom geometry.
+        mol = AllChem.AddHs(mol, addCoords=True)
+        smiles = mol_source
     else:
         mol = Chem.MolFromSmiles(mol_source)
         if mol is None:

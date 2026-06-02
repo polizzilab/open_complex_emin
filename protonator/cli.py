@@ -21,6 +21,7 @@ def main(
     recompute_ligand: bool = typer.Option(False, "--recompute-ligand", help="Recompute GAFF2/xTB per structure"),
     freeze_ligand: bool = typer.Option(True, "--freeze-ligand/--no-freeze-ligand", help="Restrain ligand heavy atoms during minimisation"),
     sweep_hbonds: bool = typer.Option(True, "--sweep-hbonds/--no-sweep-hbonds", help="Post-minimisation sweep of SER/THR/TYR hydroxyl orientations to prefer ligand H-bonds (default: on)"),
+    max_iterations: int = typer.Option(0, "--max-iterations", help="Max minimisation steps; 0 = run until convergence"),
 ) -> None:
     """
     Protonate and energy-minimise a protein–ligand complex from an AF3-style PDB.
@@ -30,7 +31,7 @@ def main(
     if available, otherwise falls back to pdb2pqr.
     """
     from .ligand import prepare_ligand
-    from .minimize import minimize_complex
+    from .minimize import minimize_complex, _extract_chain
 
     if smiles is None and ligand_file is None:
         typer.echo("Error: supply either --smiles or --ligand-file.", err=True)
@@ -43,7 +44,10 @@ def main(
     if ligand_file is not None:
         ligand_params = prepare_ligand(str(ligand_file), is_file=True)
     else:
-        ligand_params = prepare_ligand(smiles)
+        # Extract chain B from the input PDB and assign bond orders from SMILES,
+        # preserving the AF3-predicted 3-D pose rather than generating a new conformer.
+        pdb_ligand_block = _extract_ligand_pdb_block(pdb)
+        ligand_params = prepare_ligand(smiles, pdb_ligand_block=pdb_ligand_block)
 
     output_path = output_dir / (pdb.stem + "_relaxed.pdb")
     typer.echo(f"Protonating and minimising {pdb.name} …")
@@ -57,5 +61,15 @@ def main(
         recompute_ligand=recompute_ligand,
         freeze_ligand=freeze_ligand,
         sweep_hbonds=sweep_hbonds,
+        max_iterations=max_iterations,
     )
     typer.echo(f"Written → {output_path}")
+
+
+def _extract_ligand_pdb_block(pdb_path: Path) -> str:
+    """Return a PDB block string for chain B (ligand) from the input PDB."""
+    lines = [
+        line for line in pdb_path.read_text().splitlines()
+        if line[:6].strip() in ("ATOM", "HETATM") and len(line) > 21 and line[21] == "B"
+    ]
+    return "\n".join(lines) + "\nEND\n"

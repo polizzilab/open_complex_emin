@@ -24,5 +24,10 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["protonator*"]
 
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
+
 [project.scripts]
 protonator = "protonator.cli:app"
