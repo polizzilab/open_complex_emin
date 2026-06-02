@@ -150,8 +150,9 @@ class TestSmilesInput:
 class TestUnprotonatedLigand:
     """Pipeline should work even when chain B has no hydrogen atoms."""
 
-    def test_runs_when_ligand_h_absent(self, tmp_path):
-        # Strip H from chain B
+    @pytest.fixture()
+    def stripped_pdb(self, tmp_path):
+        """Input PDB with H atoms removed from chain B."""
         stripped = tmp_path / "no_lig_h.pdb"
         lines = INPUT_PDB.read_text().splitlines()
         stripped.write_text("\n".join(
@@ -159,9 +160,17 @@ class TestUnprotonatedLigand:
             if not (l[:6].strip() in ("ATOM", "HETATM")
                     and len(l) > 78 and l[21] == "B" and l[76:78].strip() == "H")
         ) + "\n")
+        return stripped
 
+    def _count_lig_h(self, pdb_path: Path) -> int:
+        return sum(
+            1 for l in pdb_path.read_text().splitlines()
+            if l[:6].strip() == "HETATM" and l[76:78].strip() == "H"
+        )
+
+    def test_ligand_file_runs_when_ligand_h_absent(self, tmp_path, stripped_pdb):
         result = runner.invoke(app, [
-            str(stripped),
+            str(stripped_pdb),
             "--ligand-file", str(LIGAND_SDF),
             "--output-dir", str(tmp_path),
             "--max-iterations", "10",
@@ -170,13 +179,20 @@ class TestUnprotonatedLigand:
         assert result.exit_code == 0, result.output
         out = tmp_path / "no_lig_h_relaxed.pdb"
         assert out.exists()
+        assert self._count_lig_h(out) > 0, "Output should contain ligand H atoms"
 
-        # Output should still have ligand H atoms (added from mol)
-        lig_h = sum(
-            1 for l in out.read_text().splitlines()
-            if l[:6].strip() == "HETATM" and l[76:78].strip() == "H"
-        )
-        assert lig_h > 0, "Output should contain ligand H atoms"
+    def test_smiles_runs_when_ligand_h_absent(self, tmp_path, stripped_pdb):
+        result = runner.invoke(app, [
+            str(stripped_pdb),
+            "--smiles", LIGAND_SMILES,
+            "--output-dir", str(tmp_path),
+            "--max-iterations", "10",
+            "--no-sweep-hbonds",
+        ])
+        assert result.exit_code == 0, result.output
+        out = tmp_path / "no_lig_h_relaxed.pdb"
+        assert out.exists()
+        assert self._count_lig_h(out) > 0, "Output should contain ligand H atoms"
 
 
 class TestErrorHandling:
