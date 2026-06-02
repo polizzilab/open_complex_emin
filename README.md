@@ -30,21 +30,18 @@ Protonates and energy-minimises AF3-style protein–ligand complexes as a drop-i
 ```bash
 cd 00_simple
 
-# 1. Create venv and install PyPI dependencies
+# 1. Create venv and install PyPI dependencies (includes pip + setuptools)
 uv sync
 
-# 2. Seed pip into the venv (install_openff.sh calls python -m pip)
-uv pip install pip setuptools
-
-# 3. Install the openff stack from GitHub source
+# 2. Install the openff stack from GitHub source
 #    (openff-toolkit, openff-units, openff-utilities are not on PyPI)
 bash scripts/install_openff.sh
 
-# 4. Install this package in editable mode
+# 3. Install this package in editable mode
 uv run python -m pip install -e . --no-build-isolation
 ```
 
-> **Note**: `uv sync` will wipe the openff packages if re-run. Re-run steps 2–4 to restore them.
+> **Note**: `uv sync` will wipe the openff packages if re-run. Re-run steps 2–3 to restore them.
 
 ---
 

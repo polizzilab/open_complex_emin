@@ -6,6 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cachetools>=5.0",
+    "pip",
+    "setuptools",
     "lxml>=5.0",
     "networkx>=3.0",
     "openmm>=8.5.1",

@@ -53,8 +53,7 @@ From: ubuntu:22.04
 
     cd /opt/open_complex_emin
     uv python install 3.12
-    uv sync
-    uv pip install pip setuptools   # install_openff.sh calls python -m pip
+    uv sync   # pip + setuptools included as dependencies; install_openff.sh can use python -m pip
     bash scripts/install_openff.sh
 
     # Tidy up pip/uv caches
