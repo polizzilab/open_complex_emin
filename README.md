@@ -49,13 +49,27 @@ uv run python -m pip install -e . --no-build-isolation
 
 ### Command line
 
-```bash
-# Ligand supplied as SDF file
-uv run protonator input.pdb --ligand-file ligand.sdf --output-dir out/
+**Option 1 — SDF / MOL file** (recommended when available)
 
-# Ligand supplied as SMILES string
-uv run protonator input.pdb --smiles "CN1C=NC2=C1C(=O)N(C(=O)N2C)C" --output-dir out/
+```bash
+uv run protonator input.pdb --ligand-file ligand.sdf --output-dir out/
 ```
+
+Bond orders, formal charges, and 3-D coordinates are read directly from the
+mol file.  The protonation state encoded in the SDF is used as-is.
+
+**Option 2 — SMILES string**
+
+```bash
+uv run protonator input.pdb \
+    --smiles "CC1=NC(=Cc2cc(F)c([O-])c(F)c2)C(=O)N1C" \
+    --output-dir out/
+```
+
+Bond orders are assigned to the ligand coordinates already present in chain B
+of the input PDB via `AssignBondOrdersFromTemplate` — the AF3-predicted 3-D
+pose is preserved.  The SMILES must encode the correct protonation state (e.g.
+`[O-]` for a phenoxide).  A fresh conformer is **not** generated.
 
 Output is written to `out/<input_stem>_relaxed.pdb`.
 
@@ -63,7 +77,7 @@ Output is written to `out/<input_stem>_relaxed.pdb`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--ligand-file` / `--smiles` | — | Ligand source (one required) |
+| `--ligand-file` / `--smiles` | — | Ligand source (exactly one required) |
 | `--output-dir` | `output/` | Directory for relaxed PDB |
 | `--ph` | `7.4` | pH for protonation state assignment |
 | `--restraint-k` | `50.0` | Backbone + ligand restraint force constant (kcal/mol/Å²) |
@@ -71,6 +85,7 @@ Output is written to `out/<input_stem>_relaxed.pdb`.
 | `--no-freeze-ligand` | off | Allow ligand heavy atoms to move during minimisation |
 | `--no-sweep-hbonds` | off | Disable post-minimisation SER/THR/TYR hydroxyl sweep |
 | `--recompute-ligand` | off | Recompute xTB charges + GAFF2 per structure instead of reusing |
+| `--max-iterations` | `0` | Max minimisation steps (0 = run until convergence) |
 
 ### Python API — batch parallelisation
 
@@ -82,15 +97,28 @@ from pathlib import Path
 from protonator.ligand import prepare_ligand
 from protonator.minimize import minimize_complex
 
-# Run once per ligand identity
+# --- Option A: ligand from SDF file ---
 ligand_params = prepare_ligand("ligand.sdf", is_file=True)
 
+# --- Option B: SMILES + PDB conformer ---
+# Reads bond orders from the SMILES and 3-D coordinates from chain B
+# of the first design PDB (all designs share the same ligand identity).
+from protonator.minimize import _extract_chain
+from protonator.cli import _extract_ligand_pdb_block
+
+pdb_block = _extract_ligand_pdb_block(Path(design_pdbs[0]))
+ligand_params = prepare_ligand(
+    "CC1=NC(=Cc2cc(F)c([O-])c(F)c2)C(=O)N1C",
+    pdb_ligand_block=pdb_block,
+)
+
+# Either way: parameterisation ran once above; workers are fast.
 def relax(pdb_path):
-    out = Path("out") / (pdb_path.stem + "_relaxed.pdb")
+    out = Path("out") / (Path(pdb_path).stem + "_relaxed.pdb")
     minimize_complex(pdb_path, ligand_params, out)
 
 with multiprocessing.Pool(32) as pool:
-    pool.map(relax, list(design_pdbs))
+    pool.map(relax, design_pdbs)
 ```
 
 ---
