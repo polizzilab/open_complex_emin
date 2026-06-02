@@ -74,7 +74,7 @@ def prepare_ligand(
         smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
     elif pdb_ligand_block is not None:
         # Use the PDB conformer coordinates + SMILES bond orders
-        pdb_mol = Chem.MolFromPDBBlock(pdb_ligand_block, removeHs=False, sanitize=False)
+        pdb_mol = Chem.MolFromPDBBlock(pdb_ligand_block)
         if pdb_mol is None:
             raise ValueError("Could not parse ligand PDB block.")
         template = Chem.MolFromSmiles(mol_source)
@@ -82,7 +82,6 @@ def prepare_ligand(
             raise ValueError(f"Could not parse SMILES: {mol_source}")
         try:
             mol = AllChem.AssignBondOrdersFromTemplate(template, pdb_mol)
-            Chem.SanitizeMol(mol)
         except Exception as e:
             raise ValueError(
                 f"AssignBondOrdersFromTemplate failed — SMILES may not match "

@@ -53,10 +53,11 @@ def _process_target(args: tuple) -> tuple[str, str | None]:
         if not sdf.exists():
             return name, f"missing ligand SDF: {sdf}"
         try:
-            from protonator.ligand import prepare_ligand
+            from rdkit import Chem as _Chem
             from protonator.minimize import minimize_complex
-            ligand_params = prepare_ligand(str(sdf), is_file=True)
-            minimize_complex(pdb, ligand_params, out)
+            _mol = _Chem.MolFromMolFile(str(sdf), removeHs=True, sanitize=True)
+            smiles = _Chem.MolToSmiles(_mol)
+            minimize_complex(pdb, smiles, out)
             return name, None
         except Exception:
             return name, traceback.format_exc()

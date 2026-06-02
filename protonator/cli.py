@@ -21,7 +21,6 @@ def main(
     ph: float = typer.Option(7.4, "--ph", help="pH for protonation state assignment"),
     restraint_k: float = typer.Option(50.0, "--restraint-k", help="Backbone/ligand restraint (kcal/mol/Å²)"),
     tolerance: float = typer.Option(30.0, "--tolerance", help="Minimisation convergence (kJ/mol/nm)"),
-    recompute_ligand: bool = typer.Option(False, "--recompute-ligand", help="Recompute GAFF2/xTB per structure"),
     freeze_ligand: bool = typer.Option(True, "--freeze-ligand/--no-freeze-ligand", help="Restrain ligand heavy atoms during minimisation"),
     sweep_hbonds: bool = typer.Option(True, "--sweep-hbonds/--no-sweep-hbonds", help="Post-minimisation sweep of SER/THR/TYR hydroxyl orientations to prefer ligand H-bonds (default: on)"),
     max_iterations: int = typer.Option(0, "--max-iterations", help="Max minimisation steps; 0 = run until convergence"),
@@ -61,24 +60,22 @@ def main(
         typer.echo("Error: supply only one of --smiles or --ligand-file.", err=True)
         raise typer.Exit(1)
 
-    from .ligand import prepare_ligand
-
-    typer.echo("Computing GFN2-xTB ligand charges …")
     if ligand_file is not None:
-        ligand_params = prepare_ligand(str(ligand_file), is_file=True)
-    else:
-        pdb_ligand_block = _extract_ligand_pdb_block(pdb)
-        ligand_params = prepare_ligand(smiles, pdb_ligand_block=pdb_ligand_block)
+        from rdkit import Chem as _Chem
+        _mol = _Chem.MolFromMolFile(str(ligand_file), removeHs=True, sanitize=True)
+        if _mol is None:
+            typer.echo(f"Error: could not parse {ligand_file}", err=True)
+            raise typer.Exit(1)
+        smiles = _Chem.MolToSmiles(_mol)
 
     typer.echo(f"Protonating and minimising {pdb.name} …")
     minimize_complex(
         pdb,
-        ligand_params,
+        smiles,
         output_path,
         ph=ph,
         restraint_k=restraint_k,
         tolerance=tolerance,
-        recompute_ligand=recompute_ligand,
         freeze_ligand=freeze_ligand,
         sweep_hbonds=sweep_hbonds,
         max_iterations=max_iterations,

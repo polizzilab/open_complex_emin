@@ -12,7 +12,6 @@ from rdkit import Chem, RDLogger
 RDLogger.DisableLog("rdApp.*")
 
 from protonator.minimize import minimize_complex, minimize_apo, _init_worker_ff
-from protonator.ligand import prepare_ligand, LigandParams
 
 app = typer.Typer(add_completion=False)
 
@@ -36,7 +35,6 @@ def protonate_batch(
     ph: float = typer.Option(7.4, "--ph", help="pH for protonation state assignment"),
     restraint_k: float = typer.Option(50.0, "--restraint-k", help="Backbone/ligand restraint (kcal/mol/Å²)"),
     tolerance: float = typer.Option(30.0, "--tolerance", help="Minimisation convergence (kJ/mol/nm)"),
-    recompute_ligand: bool = typer.Option(False, "--recompute-ligand", help="Recompute GAFF2/xTB per structure"),
     freeze_ligand: bool = typer.Option(True, "--freeze-ligand/--no-freeze-ligand", help="Restrain ligand heavy atoms during minimisation"),
     sweep_hbonds: bool = typer.Option(True, "--sweep-hbonds/--no-sweep-hbonds", help="Post-minimisation sweep of SER/THR/TYR hydroxyl orientations to prefer ligand H-bonds (default: on)"),
     max_iterations: int = typer.Option(0, "--max-iterations", help="Max minimisation steps; 0 = run until convergence"),
@@ -85,19 +83,12 @@ def protonate_batch(
             for _ in track(pool.imap_unordered(minimize_apo_pool, inputs), total=len(inputs), description=f"Running apo energy minimization…"):
                 pass
     else:
-
-        # Make placeholder ligand params if recomputing each structure, otherwise compute once and reuse
-        ligand_params = LigandParams(smiles, [], "", "")
-        if not recompute_ligand:
-            ligand_params = prepare_ligand(smiles, is_file=False)
-
-        # Prepare input data for minimize_complex
         for pdb_path in all_targets:
             name = pdb_path.stem
             out_path = output_dir / (name + (suffix if suffix else "_emin.pdb"))
             inputs.append({
                 "pdb_path": str(pdb_path),
-                "ligand_params": ligand_params,
+                "smiles": smiles,
                 "output_path": str(out_path),
                 "ph": ph,
                 "restraint_k": restraint_k,
@@ -105,12 +96,8 @@ def protonate_batch(
                 "freeze_ligand": freeze_ligand,
                 "sweep_hbonds": sweep_hbonds,
                 "max_iterations": max_iterations,
-                "recompute_ligand": recompute_ligand
             })
 
-        # Launch parallel workers; pass gaff_xml so each worker pre-loads the
-        # LIG template once at init instead of re-reading ff14SB.xml per call.
-        gaff_xml = ligand_params.gaff_xml if not recompute_ligand else None
-        with Pool(n_workers, initializer=_init_worker_ff, initargs=(1, gaff_xml)) as pool:
+        with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
             for _ in track(pool.imap_unordered(minimize_complex_pool, inputs), total=len(inputs), description=f"Running ligand-bound energy minimization…"):
                 pass
