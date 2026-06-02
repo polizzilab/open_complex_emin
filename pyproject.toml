@@ -1,0 +1,28 @@
+[project]
+name = "protonator"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "cachetools>=5.0",
+    "lxml>=5.0",
+    "networkx>=3.0",
+    "openmm>=8.5.1",
+    "openmmforcefields>=0.15.1",
+    "packaging>=23.0",
+    "parmed>=4.0",
+    "prody>=2.4",
+    "pint>=0.23",
+    "python-constraint>=1.4",
+    "rdkit>=2026.3.2",
+    "tblite>=0.6",
+    "tinydb>=4.0",
+    "typer>=0.12",
+]
+
+[tool.setuptools.packages.find]
+include = ["protonator*"]
+
+[project.scripts]
+protonator = "protonator.cli:app"

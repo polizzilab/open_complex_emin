@@ -1,0 +1,96 @@
+"""
+Batch-process a directory of protein-ligand targets with protonator.
+
+Each subdirectory must contain:
+    {name}_protein.pdb
+    {name}_ligand.sdf
+
+Output is written to {dir}/{name}_relaxed.pdb.
+Failures are logged to {dataset_dir}/failures.tsv.
+"""
+from __future__ import annotations
+
+import argparse
+import multiprocessing
+import sys
+import traceback
+from pathlib import Path
+
+
+def _process_target(args: tuple) -> tuple[str, str | None]:
+    """
+    Worker: (target_dir, n_workers_hint) -> (name, error_or_None).
+    Imported here so it is picklable on all platforms.
+    """
+    target_dir, _ = args
+    target_dir = Path(target_dir)
+    name = target_dir.name
+
+    pdb  = target_dir / f"{name}_protein.pdb"
+    sdf  = target_dir / f"{name}_ligand.sdf"
+    out  = target_dir / f"{name}_relaxed.pdb"
+
+    if not pdb.exists():
+        return name, f"missing protein PDB: {pdb}"
+    if not sdf.exists():
+        return name, f"missing ligand SDF: {sdf}"
+
+    try:
+        # Import here so each worker gets a fresh module state
+        from protonator.ligand import prepare_ligand
+        from protonator.minimize import minimize_complex
+
+        ligand_params = prepare_ligand(str(sdf), is_file=True)
+        minimize_complex(pdb, ligand_params, out)
+        return name, None
+    except Exception:
+        return name, traceback.format_exc()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("dataset_dir", type=Path,
+                        help="Directory containing one subdirectory per target.")
+    parser.add_argument("-j", "--jobs", type=int, default=8,
+                        help="Parallel workers (default: 8).")
+    args = parser.parse_args()
+
+    dataset_dir: Path = args.dataset_dir.resolve()
+    if not dataset_dir.is_dir():
+        sys.exit(f"Not a directory: {dataset_dir}")
+
+    targets = sorted(p for p in dataset_dir.iterdir() if p.is_dir())
+    if not targets:
+        sys.exit("No subdirectories found.")
+
+    print(f"Found {len(targets)} targets — running with {args.jobs} workers")
+
+    work = [(str(t), args.jobs) for t in targets]
+
+    failures: list[tuple[str, str]] = []
+    completed = 0
+
+    with multiprocessing.Pool(args.jobs) as pool:
+        for name, error in pool.imap_unordered(_process_target, work):
+            completed += 1
+            if error:
+                failures.append((name, error))
+                print(f"[{completed:3d}/{len(targets)}] FAIL  {name}")
+            else:
+                print(f"[{completed:3d}/{len(targets)}] OK    {name}")
+
+    # Write failure log
+    log_path = dataset_dir / "failures.tsv"
+    if failures:
+        with open(log_path, "w") as fh:
+            fh.write("target\terror\n")
+            for name, err in failures:
+                fh.write(f"{name}\t{err.replace(chr(10), ' | ')}\n")
+        print(f"\n{len(failures)}/{len(targets)} failures — details in {log_path}")
+    else:
+        print(f"\nAll {len(targets)} targets completed successfully.")
+        log_path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    main()
