@@ -69,6 +69,7 @@ Output is written to `out/<input_stem>_relaxed.pdb`.
 | `--restraint-k` | `50.0` | Backbone + ligand restraint force constant (kcal/mol/Å²) |
 | `--tolerance` | `10.0` | Minimisation convergence (kJ/mol/nm) |
 | `--no-freeze-ligand` | off | Allow ligand heavy atoms to move during minimisation |
+| `--no-sweep-hbonds` | off | Disable post-minimisation SER/THR/TYR hydroxyl sweep |
 | `--recompute-ligand` | off | Recompute xTB charges + GAFF2 per structure instead of reusing |
 
 ### Python API — batch parallelisation

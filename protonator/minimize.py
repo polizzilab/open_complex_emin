@@ -32,6 +32,7 @@ def minimize_complex(
     tolerance: float = 10.0,     # kJ/mol/nm — convergence criterion
     max_iterations: int = 0,     # 0 = until convergence
     freeze_ligand: bool = True,  # restrain ligand heavy atoms; False lets ligand relax
+    sweep_hbonds: bool = True,   # post-minimisation hydroxyl sweep for SER/THR
 ) -> None:
     """
     Protonate, flip-optimise, and energy-minimise a protein–ligand complex.
@@ -124,8 +125,11 @@ def minimize_complex(
         1.0 / unit.picosecond,
         0.002 * unit.picoseconds,
     )
+    import os
+    cpu_threads = str(int(os.environ.get("OMP_NUM_THREADS", 1)))
     platform = openmm.Platform.getPlatformByName("CPU")
-    sim = app.Simulation(modeller.topology, system, integrator, platform)
+    sim = app.Simulation(modeller.topology, system, integrator, platform,
+                         {"Threads": cpu_threads})
     sim.context.setPositions(modeller.positions)
     sim.minimizeEnergy(
         tolerance=tolerance * unit.kilojoules_per_mole / unit.nanometer,
@@ -133,11 +137,23 @@ def minimize_complex(
     )
 
     # ------------------------------------------------------------------
-    # 7. Write output
+    # 7. Optional: sweep SER/THR hydroxyl orientations to prefer ligand H-bonds
     # ------------------------------------------------------------------
     state = sim.context.getState(getPositions=True)
+    final_pos = state.getPositions()
+
+    if sweep_hbonds:
+        pos_nm = np.array([[v.x, v.y, v.z] for v in final_pos.value_in_unit(unit.nanometer)])
+        pos_nm = _sweep_ser_thr(modeller.topology, pos_nm)
+        final_pos = unit.Quantity(
+            [openmm.Vec3(*row) for row in pos_nm], unit.nanometer
+        )
+
+    # ------------------------------------------------------------------
+    # 8. Write output
+    # ------------------------------------------------------------------
     with open(output_path, "w") as fh:
-        app.PDBFile.writeFile(modeller.topology, state.getPositions(), fh)
+        app.PDBFile.writeFile(modeller.topology, final_pos, fh)
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +240,125 @@ def _add_conect_records(ligand_pdb_text: str, rdmol) -> str:
 
     body = [l for l in ligand_pdb_text.splitlines() if not l.startswith("END")]
     return "\n".join(body + conect + ["END"])
+
+
+# ---------------------------------------------------------------------------
+# SER / THR hydroxyl sweep
+# ---------------------------------------------------------------------------
+
+# Hydroxyl donor atom for each residue, and the two heavy atoms that define
+# the rotation axis (axis = bonded_to_O → O_atom).
+_HYDROXYL = {
+    "SER": ("OG",  "HG",  "CB"),
+    "THR": ("OG1", "HG1", "CB"),
+    "TYR": ("OH",  "HH",  "CZ"),  # included for completeness
+}
+# Residue names that could act as H-bond acceptors (backbone + polar sc)
+_ACCEPTOR_ELEMENTS = {"O", "N", "F", "S"}
+
+
+def _rotate(point: np.ndarray, origin: np.ndarray, axis: np.ndarray, theta: float) -> np.ndarray:
+    """Rotate *point* around *axis* through *origin* by *theta* radians (Rodrigues)."""
+    axis = axis / (np.linalg.norm(axis) + 1e-12)
+    v = point - origin
+    return origin + (v * np.cos(theta)
+                     + np.cross(axis, v) * np.sin(theta)
+                     + axis * np.dot(axis, v) * (1 - np.cos(theta)))
+
+
+def _hbond_score(h_pos: np.ndarray, donor_pos: np.ndarray, acc_pos: np.ndarray) -> float:
+    """
+    Continuous H-bond quality score in [0, 1]: 1 = perfect geometry, 0 = invalid.
+    All positions in nm.  Uses the same distance + angle criteria as bunsalyze.
+    """
+    # Thresholds converted to nm (bunsalyze uses Å)
+    D_DA_MAX = 0.35   # 3.5 Å
+    D_DA_MIN = 0.15   # 1.5 Å
+    D_HA_MAX = 0.25   # 2.5 Å
+    D_HA_MIN = 0.05   # 0.5 Å
+
+    d_da = np.linalg.norm(donor_pos - acc_pos)
+    if d_da > D_DA_MAX or d_da < D_DA_MIN:
+        return 0.0
+    d_ha = np.linalg.norm(h_pos - acc_pos)
+    if d_ha > D_HA_MAX or d_ha < D_HA_MIN:
+        return 0.0
+    dv = h_pos - donor_pos
+    av = h_pos - acc_pos
+    cos = np.dot(dv, av) / (np.linalg.norm(dv) * np.linalg.norm(av) + 1e-9)
+    angle = np.degrees(np.arccos(np.clip(cos, -1, 1)))
+    if angle < 110:
+        return 0.0
+    return (1 - d_ha / D_HA_MAX) * (angle - 110) / 70
+
+
+def _sweep_ser_thr(
+    topology: app.Topology,
+    pos_nm: np.ndarray,        # (N_atoms, 3) in nm, will be modified in-place copy
+    step_deg: float = 5.0,
+    search_radius_nm: float = 0.45,   # 4.5 Å — candidate acceptor search sphere
+) -> np.ndarray:
+    """
+    For each SER/THR/TYR residue, sweep the hydroxyl dihedral and replace the
+    current H position with the orientation that best H-bonds a **ligand** atom.
+
+    If no orientation forms a valid ligand H-bond, the H is left unchanged.
+    The updated positions array (nm) is returned.
+    """
+    pos = pos_nm.copy()
+    angles = np.deg2rad(np.arange(0, 360, step_deg))
+
+    # Index topology atoms for fast lookup
+    idx: dict[tuple, int] = {}          # (res_index, atom_name) -> atom index
+    for atom in topology.atoms():
+        idx[(atom.residue.index, atom.name)] = atom.index
+
+    # Collect ligand acceptor indices
+    lig_acceptors = [
+        atom.index for atom in topology.atoms()
+        if atom.residue.name == "LIG"
+        and atom.element is not None
+        and atom.element.symbol in _ACCEPTOR_ELEMENTS
+        and atom.element.symbol != "H"
+    ]
+
+    for residue in topology.residues():
+        if residue.name not in _HYDROXYL:
+            continue
+        o_name, h_name, axis_name = _HYDROXYL[residue.name]
+
+        o_idx   = idx.get((residue.index, o_name))
+        h_idx   = idx.get((residue.index, h_name))
+        ax_idx  = idx.get((residue.index, axis_name))
+        if any(x is None for x in [o_idx, h_idx, ax_idx]):
+            continue
+
+        o_pos  = pos[o_idx]
+        h_pos  = pos[h_idx]
+        ax_pos = pos[ax_idx]
+        axis   = o_pos - ax_pos   # rotation axis: axis_atom → O
+
+        # Candidate acceptors within search radius
+        lig_cands = [
+            i for i in lig_acceptors
+            if np.linalg.norm(pos[i] - o_pos) <= search_radius_nm
+        ]
+        if not lig_cands:
+            continue   # no ligand atom close enough — nothing to do
+
+        # Sweep and score each candidate ligand acceptor
+        best_score = 0.0
+        best_h_pos = None
+
+        for theta in angles:
+            h_trial = _rotate(h_pos, o_pos, axis, theta)
+            for acc_idx in lig_cands:
+                score = _hbond_score(h_trial, o_pos, pos[acc_idx])
+                if score > best_score:
+                    best_score = score
+                    best_h_pos = h_trial
+
+        if best_h_pos is not None:
+            pos[h_idx] = best_h_pos
+
+    return pos

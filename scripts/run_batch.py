@@ -17,9 +17,18 @@ import traceback
 from pathlib import Path
 
 
+def _init_worker(threads_per_worker: int) -> None:
+    """Set thread-count env vars before any library is imported in this worker."""
+    import os
+    t = str(threads_per_worker)
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ[var] = t
+
+
 def _process_target(args: tuple) -> tuple[str, str | None]:
     """
-    Worker: (target_dir, n_workers_hint) -> (name, error_or_None).
+    Worker: (target_dir, threads_per_worker) -> (name, error_or_None).
     Imported here so it is picklable on all platforms.
     """
     target_dir, _ = args
@@ -53,6 +62,8 @@ def main() -> None:
                         help="Directory containing one subdirectory per target.")
     parser.add_argument("-j", "--jobs", type=int, default=8,
                         help="Parallel workers (default: 8).")
+    parser.add_argument("-t", "--threads-per-worker", type=int, default=1,
+                        help="CPU threads each worker may use (default: 1).")
     args = parser.parse_args()
 
     dataset_dir: Path = args.dataset_dir.resolve()
@@ -63,14 +74,18 @@ def main() -> None:
     if not targets:
         sys.exit("No subdirectories found.")
 
-    print(f"Found {len(targets)} targets — running with {args.jobs} workers")
+    tpw = args.threads_per_worker
+    print(f"Found {len(targets)} targets — running with {args.jobs} workers "
+          f"({tpw} thread(s) each)")
 
-    work = [(str(t), args.jobs) for t in targets]
+    work = [(str(t), tpw) for t in targets]
 
     failures: list[tuple[str, str]] = []
     completed = 0
 
-    with multiprocessing.Pool(args.jobs) as pool:
+    with multiprocessing.Pool(args.jobs,
+                              initializer=_init_worker,
+                              initargs=(tpw,)) as pool:
         for name, error in pool.imap_unordered(_process_target, work):
             completed += 1
             if error:

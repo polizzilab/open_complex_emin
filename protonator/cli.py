@@ -20,6 +20,7 @@ def main(
     tolerance: float = typer.Option(10.0, "--tolerance", help="Minimisation convergence (kJ/mol/nm)"),
     recompute_ligand: bool = typer.Option(False, "--recompute-ligand", help="Recompute GAFF2/xTB per structure"),
     freeze_ligand: bool = typer.Option(True, "--freeze-ligand/--no-freeze-ligand", help="Restrain ligand heavy atoms during minimisation"),
+    sweep_hbonds: bool = typer.Option(True, "--sweep-hbonds/--no-sweep-hbonds", help="Post-minimisation sweep of SER/THR/TYR hydroxyl orientations to prefer ligand H-bonds (default: on)"),
 ) -> None:
     """
     Protonate and energy-minimise a protein–ligand complex from an AF3-style PDB.
@@ -55,5 +56,6 @@ def main(
         tolerance=tolerance,
         recompute_ligand=recompute_ligand,
         freeze_ligand=freeze_ligand,
+        sweep_hbonds=sweep_hbonds,
     )
     typer.echo(f"Written → {output_path}")
