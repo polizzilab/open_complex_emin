@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environment
+.venv
+
+# Generated minimisation outputs (debug/)
+debug/output*/
+debug2/output*/
+
+# pytest cache
+.pytest_cache/
