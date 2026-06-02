@@ -18,7 +18,7 @@ from protonator.cli import app
 # Fixtures
 # ---------------------------------------------------------------------------
 
-DEBUG = Path(__file__).parent.parent / "debug"
+DEBUG = Path(__file__).parent.parent / "examples" / "debug"
 
 INPUT_PDB = DEBUG / "nise_iter_012-197_sample_0.pdb"
 LIGAND_SDF = DEBUG / "temp_lig.sdf"

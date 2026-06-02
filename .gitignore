@@ -9,9 +9,8 @@ wheels/
 # Virtual environment
 .venv
 
-# Generated minimisation outputs (debug/)
-debug/output*/
-debug2/output*/
+# Generated minimisation outputs (examples/)
+examples/*/output*/
 
 # pytest cache
 .pytest_cache/
