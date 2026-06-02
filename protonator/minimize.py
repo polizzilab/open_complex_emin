@@ -387,19 +387,20 @@ def _build_lig_acceptor_info(
     rdmol: "Chem.Mol",
     topology: app.Topology,
     pos_nm: np.ndarray,
-) -> dict[int, tuple[str, str, bool, list]]:
+) -> dict[int, tuple]:
     """
     For each ligand acceptor atom in the topology, return a dict:
-        topology_atom_idx → (atom_name, element, is_aromatic_planar, covalent_bonded_heavy_atoms)
+        topology_atom_idx → (atom_name, element, is_aromatic_planar,
+                             covalent_bonded_heavy_atoms, donor_hydrogens)
 
     is_aromatic_planar and covalent_bonded_heavy_atoms follow bunsalyze's
-    calc_ligand_dons_accs.py: is_aromatic_planar is True for sp2 N with exactly
-    2 heavy-atom bonds and no H (lone-pair geometry check needed in is_valid_hbond).
-    Bonded heavy atom coords come from the current topology positions (post-
-    minimisation) so the geometry is consistent with the sweep.
+    calc_ligand_dons_accs.py.  donor_hydrogens is populated so that
+    is_valid_hbond can perform H-H clash checking (H_TO_H_CLASH_DIST = 1.5 Å)
+    and reject sweep orientations where the incoming protein OH clashes with
+    a hydrogen already on the ligand acceptor atom.
     """
     from rdkit import Chem as _Chem
-    from .hbonds import BondedHeavyAtom
+    from .hbonds import BondedHeavyAtom, DonorHydrogen
 
     ANG = 10.0  # nm → Å
 
@@ -458,10 +459,22 @@ def _build_lig_acceptor_info(
                 coord=pos_nm[other_topo_idx] * ANG,
             ))
 
+        # donor_hydrogens: H atoms covalently bonded to this acceptor,
+        # needed by is_valid_hbond's H-H clash check.
+        donor_hs: list = []
+        conf = rdmol.GetConformer()
+        for bond in rdatom.GetBonds():
+            other = bond.GetOtherAtom(rdatom)
+            if other.GetAtomicNum() == 1:
+                h_coord_ang = np.array(conf.GetAtomPosition(other.GetIdx()))
+                ori = other.GetPDBResidueInfo()
+                hname = ori.GetName().strip() if ori else f"H{other.GetIdx()}"
+                donor_hs.append(DonorHydrogen(hname, h_coord_ang))
+
         ri = rdatom.GetPDBResidueInfo()
         aname = ri.GetName().strip() if ri else f"{elem}{rdidx}"
 
-        result[topo_atom.index] = (aname, elem, is_planar, cov)
+        result[topo_atom.index] = (aname, elem, is_planar, cov, donor_hs)
 
     return result
 
@@ -497,10 +510,10 @@ def _sweep_ser_thr(
     if rdmol is not None:
         acc_info = _build_lig_acceptor_info(rdmol, topology, pos_nm)
     else:
-        # Fallback: element only, no aromatic planar check
+        # Fallback: element only, no aromatic planar check or clash check
         for a in topology.atoms():
             if a.residue.name == "LIG" and a.element and a.element.symbol in _ACCEPTOR_ELEMENTS:
-                acc_info[a.index] = (a.name, a.element.symbol, False, [])
+                acc_info[a.index] = (a.name, a.element.symbol, False, [], [])
 
     for residue in topology.residues():
         if residue.name not in _HYDROXYL:
@@ -547,24 +560,24 @@ def _sweep_ser_thr(
                 is_buried=True,
             )
 
-            for acc_idx, (aname, acc_elem, is_planar, cov) in cands:
-                # cov coords already reflect post-minimisation positions
-                # (set by _build_lig_acceptor_info); only H atoms move in the sweep.
+            for acc_idx, (aname, acc_elem, is_planar, cov, donor_hs) in cands:
+                # donor_hs: H atoms on the acceptor atom, used for H-H clash check.
+                # cov: bonded heavy atoms for aromatic planar geometry check.
                 acc_pa = PolarAtom(
                     name=aname,
                     coord=pos[acc_idx] * ANG,
-                    donor_count=0,
+                    donor_count=len(donor_hs),
                     acceptor_count=2,
                     parent_group_identifier=("B", "LIG", 1, ""),
                     element=acc_elem,
                     is_ligand_atom=True,
-                    donor_hydrogens=[],
+                    donor_hydrogens=donor_hs,
                     is_aromatic_planar=is_planar,
                     covalent_bonded_heavy_atoms=cov,
                     is_buried=True,
                 )
 
-                if is_valid_hbond(donor_pa, donor_h, acc_pa, clash_check=False):
+                if is_valid_hbond(donor_pa, donor_h, acc_pa, clash_check=True):
                     ha_dist = np.linalg.norm(h_trial_ang - pos[acc_idx] * ANG)
                     if ha_dist < best_ha_dist:
                         best_ha_dist = ha_dist
