@@ -82,7 +82,7 @@ def minimize_complex(
     with tempfile.TemporaryDirectory() as td:
         prot_path = Path(td) / "protein.pdb"
         lig_path  = Path(td) / "ligand.pdb"
-        prot_path.write_text(protein_text)
+        prot_path.write_text(_ensure_oxt(protein_text))
         lig_path.write_text(_mol_to_ligand_pdb(ligand_params.mol))
         prot_pdb = app.PDBFile(str(prot_path))
         lig_pdb  = app.PDBFile(str(lig_path))
@@ -183,7 +183,7 @@ def minimize_apo(
 
     with tempfile.TemporaryDirectory() as td:
         prot_path = Path(td) / "protein.pdb"
-        prot_path.write_text(protein_text)
+        prot_path.write_text(_ensure_oxt(protein_text))
         prot_pdb = app.PDBFile(str(prot_path))
 
     ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
@@ -234,6 +234,87 @@ def _extract_chain(pdb_text: str, chain_id: str) -> str:
     ]
     lines.append("END")
     return "\n".join(lines)
+
+
+def _ensure_oxt(protein_text: str) -> str:
+    """Add OXT to any chain's C-terminal residue that is missing it.
+
+    Places OXT as the mirror image of O reflected through the CA→C bond
+    extension, which gives CA-C-OXT ≈ 117° and O-C-OXT ≈ 126° — matching
+    the ideal carboxylate geometry.  Without OXT, ff14SB cannot find a
+    template for the terminal residue and raises a ValueError.
+    """
+    from collections import defaultdict
+
+    lines = protein_text.splitlines(keepends=True)
+
+    # Collect per-residue atom coordinates from ATOM records
+    res_atoms: dict[tuple, dict[str, tuple[int, np.ndarray]]] = {}
+    for i, line in enumerate(lines):
+        if not line.startswith("ATOM"):
+            continue
+        name = line[12:16].strip()
+        resname = line[17:20].strip()
+        chain = line[21]
+        try:
+            resseq = int(line[22:26])
+            x, y, z = float(line[30:38]), float(line[38:46]), float(line[46:54])
+        except ValueError:
+            continue
+        key = (chain, resseq, resname)
+        res_atoms.setdefault(key, {})[name] = (i, np.array([x, y, z]))
+
+    # Find last residue per chain
+    chain_last: dict[str, tuple] = {}
+    for (chain, resseq, resname) in res_atoms:
+        prev = chain_last.get(chain)
+        if prev is None or resseq > prev[0]:
+            chain_last[chain] = (resseq, resname)
+
+    insertions: list[tuple[int, str]] = []
+
+    for chain, (last_resseq, last_resname) in chain_last.items():
+        atoms = res_atoms[(chain, last_resseq, last_resname)]
+        if "OXT" in atoms or "OT2" in atoms:
+            continue
+        if not {"CA", "C", "O"}.issubset(atoms):
+            continue
+
+        ca = atoms["CA"][1]
+        c  = atoms["C"][1]
+        o  = atoms["O"][1]
+
+        # Mirror O through the CA→C bond axis (both in the carboxylate plane)
+        v_ext = c - ca
+        v_ext /= np.linalg.norm(v_ext)
+        v_co = o - c
+        n = np.cross(v_ext, v_co)
+        if np.linalg.norm(n) < 1e-6:
+            continue
+        n /= np.linalg.norm(n)
+        perp_hat = np.cross(n, v_ext)
+        par = np.dot(v_co, v_ext) * v_ext
+        perp = np.dot(v_co, perp_hat) * perp_hat
+        v_oxt = par - perp  # reflect perpendicular component
+        v_oxt = v_oxt / np.linalg.norm(v_oxt) * 1.25  # C–OXT ≈ 1.25 Å
+        oxt = c + v_oxt
+
+        last_line_idx = max(idx for idx, _ in atoms.values())
+        last_serial = int(lines[last_line_idx][6:11])
+        o_line = lines[atoms["O"][0]]
+        occ_bf = o_line[54:66] if len(o_line) > 66 else "  1.00  0.00"
+        oxt_line = (
+            f"ATOM  {last_serial+1:5d}  OXT {last_resname:3s} "
+            f"{chain}{last_resseq:4d}    "
+            f"{oxt[0]:8.3f}{oxt[1]:8.3f}{oxt[2]:8.3f}"
+            f"{occ_bf}           O  \n"
+        )
+        insertions.append((last_line_idx, oxt_line))
+
+    for idx, oxt_line in sorted(insertions, reverse=True):
+        lines.insert(idx + 1, oxt_line)
+
+    return "".join(lines)
 
 
 def _add_restraints(
