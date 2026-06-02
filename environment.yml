@@ -11,8 +11,9 @@ dependencies:
   - openff-toolkit-base
   - openmm
   - rdkit
-  # GFN2-xTB partial charges
+  # GFN2-xTB partial charges (tblite = C library, tblite-python = Python bindings)
   - tblite
+  - tblite-python
   # remaining runtime deps (all on conda-forge)
   - parmed
   - prody
