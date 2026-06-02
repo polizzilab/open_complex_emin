@@ -1,0 +1,33 @@
+name: protonator
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  # AmberTools provides antechamber + parmchk2 (GAFF2 atom typing)
+  - ambertools
+  # openff-toolkit-base is the core toolkit WITHOUT the optional openff-nagl
+  # neural-network charge model — which would otherwise pull in pytorch and a
+  # full CUDA toolkit (~1 GB). We use GFN2-xTB charges (tblite), not NAGL.
+  - openff-toolkit-base
+  - openmm
+  - rdkit
+  # GFN2-xTB partial charges
+  - tblite
+  # remaining runtime deps (all on conda-forge)
+  - parmed
+  - prody
+  - lxml
+  - networkx
+  - cachetools
+  - pint
+  - tinydb
+  - typer
+  - pytest
+  - pip
+  - pip:
+      - python-constraint
+      # openmmforcefields is pure-Python; install with --no-deps so pip does
+      # not pull the yanked PyPI openff-toolkit. Its runtime deps (openff
+      # toolkit, parmed, ambertools) are already provided by conda above.
+      - --no-deps
+      - openmmforcefields

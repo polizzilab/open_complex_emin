@@ -19,29 +19,36 @@ Protonates and energy-minimises AF3-style protein–ligand complexes as a drop-i
 
 ## Installation
 
-### Requirements
-
-- Python 3.12
-- [`uv`](https://docs.astral.sh/uv/) for environment management
-- `antechamber` and `parmchk2` (AmberTools) on `PATH` — used by `openmmforcefields` for GAFF2 atom typing
-
-### Steps
+Installation uses **conda** (miniforge / mambaforge recommended). The OpenFF
+stack and AmberTools are only distributed through conda-forge, not PyPI, so
+conda manages the whole environment.
 
 ```bash
 cd 00_simple
 
-# 1. Create venv and install PyPI dependencies (includes pip + setuptools)
-uv sync
+# 1. Create the conda environment (conda-forge: ambertools, openff stack,
+#    openmm, rdkit, tblite, and all other runtime deps)
+conda env create -f environment.yml
 
-# 2. Install the openff stack from GitHub source
-#    (openff-toolkit, openff-units, openff-utilities are not on PyPI)
-bash scripts/install_openff.sh
-
-# 3. Install this package in editable mode
-uv run python -m pip install -e . --no-build-isolation
+# 2. Install this package into the environment
+conda activate protonator
+pip install -e . --no-deps
 ```
 
-> **Note**: `uv sync` will wipe the openff packages if re-run. Re-run steps 2–3 to restore them.
+That's it — `antechamber`/`parmchk2` (AmberTools), `openff-toolkit`, `openmm`,
+`rdkit`, and `tblite` are all installed by `conda env create`. Run `pip install`
+with `--no-deps` because conda already provides every dependency.
+
+### Singularity container
+
+A [`protonator.def`](protonator.def) builds a self-contained image. Use the provided script (no root required):
+
+```bash
+bash build_container.sh
+singularity run protonator.sif input.pdb --ligand-file ligand.sdf --output-dir out/
+```
+
+`build_container.sh` calls `singularity build --fakeroot protonator.sif protonator.def` — it installs miniforge3, creates the conda environment, and installs the `protonator` package inside the image.
 
 ---
 
@@ -49,10 +56,12 @@ uv run python -m pip install -e . --no-build-isolation
 
 ### Command line
 
+With the `protonator` conda environment activated (`conda activate protonator`):
+
 **Option 1 — SDF / MOL file** (recommended when available)
 
 ```bash
-uv run protonator input.pdb --ligand-file ligand.sdf --output-dir out/
+protonator input.pdb --ligand-file ligand.sdf --output-dir out/
 ```
 
 Bond orders, formal charges, and 3-D coordinates are read directly from the
@@ -61,7 +70,7 @@ mol file.  The protonation state encoded in the SDF is used as-is.
 **Option 2 — SMILES string**
 
 ```bash
-uv run protonator input.pdb \
+protonator input.pdb \
     --smiles "CC1=NC(=Cc2cc(F)c([O-])c(F)c2)C(=O)N1C" \
     --output-dir out/
 ```
@@ -147,6 +156,11 @@ The ligand protonation state must be known in advance (encoded in the SMILES or 
 
 ---
 
-## Dependencies not on PyPI
+## Dependencies
 
-`openff-toolkit`, `openff-units`, and `openff-utilities` must be installed from GitHub source via `scripts/install_openff.sh`. All other dependencies are in `pyproject.toml`.
+All dependencies are resolved by `conda env create -f environment.yml` from
+conda-forge. The OpenFF stack (`openff-toolkit`, `openff-units`,
+`openff-utilities`) and AmberTools are not available on PyPI in a usable state —
+conda-forge is their official distribution channel — which is why the project
+uses a conda environment rather than a pip/uv virtualenv. `pyproject.toml`
+documents the Python-level dependencies and defines the `protonator` package.

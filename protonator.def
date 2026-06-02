@@ -7,10 +7,10 @@ From: ubuntu:22.04
     Source https://github.com/polizzilab/open_complex_emin
 
 %environment
-    # ambertools conda env  → antechamber, parmchk2
-    # project .venv         → protonator and all Python deps
-    export PATH="/opt/miniforge3/envs/ambertools/bin:/opt/open_complex_emin/.venv/bin:/opt/miniforge3/bin:$PATH"
-    export CONDA_DEFAULT_ENV=base
+    # The protonator conda env contains everything: antechamber/parmchk2
+    # (ambertools), the openff stack, openmm, rdkit, and protonator itself.
+    export PATH="/opt/miniforge3/envs/protonator/bin:/opt/miniforge3/bin:$PATH"
+    export CONDA_DEFAULT_ENV=protonator
 
 %post
     export DEBIAN_FRONTEND=noninteractive
@@ -19,7 +19,7 @@ From: ubuntu:22.04
     # System packages
     # -----------------------------------------------------------------------
     apt-get update -qq && apt-get install -y -q --no-install-recommends \
-        wget git build-essential ca-certificates libssl-dev \
+        wget git ca-certificates \
         && rm -rf /var/lib/apt/lists/*
 
     # -----------------------------------------------------------------------
@@ -33,34 +33,27 @@ From: ubuntu:22.04
     export PATH="/opt/miniforge3/bin:$PATH"
 
     # -----------------------------------------------------------------------
-    # uv via conda (base env) — used to manage Python 3.12 + .venv
-    # AmberTools in a dedicated conda env so it can use whatever Python it
-    # needs without conflicting with the project's Python 3.12 requirement.
+    # Clone repo and create the conda environment from environment.yml.
+    # conda-forge provides ambertools, the openff stack, openmm, rdkit, and
+    # tblite — no GitHub-source builds or PyPI workarounds needed.
     # -----------------------------------------------------------------------
-    conda install -y -n base -c conda-forge uv
-    conda create  -y -n ambertools -c conda-forge ambertools
-    conda clean   -y --all
-
-    # -----------------------------------------------------------------------
-    # Clone protonator repo and install with uv — mirrors the normal workflow:
-    #   1.  uv python install 3.12  → uv fetches its own CPython 3.12 build
-    #   2.  uv sync                 → creates .venv, installs all PyPI deps
-    #   3.  install_openff          → openff stack from GitHub into .venv
-    # -----------------------------------------------------------------------
-    git clone --depth 1 \
+    GIT_TERMINAL_PROMPT=0 git clone --depth 1 \
         https://github.com/polizzilab/open_complex_emin.git \
         /opt/open_complex_emin
 
-    cd /opt/open_complex_emin
-    uv python install 3.12
-    uv sync   # pip + setuptools included as dependencies; install_openff.sh can use python -m pip
-    bash scripts/install_openff.sh
+    conda env create -f /opt/open_complex_emin/environment.yml -n protonator
 
-    # Tidy up pip/uv caches
-    /opt/open_complex_emin/.venv/bin/pip cache purge 2>/dev/null || true
+    # Install the protonator package itself into the env (deps already present)
+    /opt/miniforge3/envs/protonator/bin/pip install --no-deps \
+        /opt/open_complex_emin
+
+    conda clean -y --all
 
 %runscript
     exec protonator "$@"
+
+%test
+    protonator --help > /dev/null && echo "protonator OK"
 
 %help
     Protein-ligand protonation and energy minimisation pipeline.
