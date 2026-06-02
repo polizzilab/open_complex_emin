@@ -147,6 +147,38 @@ class TestSmilesInput:
         assert _count_h(out) > _count_h_input()
 
 
+class TestUnprotonatedLigand:
+    """Pipeline should work even when chain B has no hydrogen atoms."""
+
+    def test_runs_when_ligand_h_absent(self, tmp_path):
+        # Strip H from chain B
+        stripped = tmp_path / "no_lig_h.pdb"
+        lines = INPUT_PDB.read_text().splitlines()
+        stripped.write_text("\n".join(
+            l for l in lines
+            if not (l[:6].strip() in ("ATOM", "HETATM")
+                    and len(l) > 78 and l[21] == "B" and l[76:78].strip() == "H")
+        ) + "\n")
+
+        result = runner.invoke(app, [
+            str(stripped),
+            "--ligand-file", str(LIGAND_SDF),
+            "--output-dir", str(tmp_path),
+            "--max-iterations", "10",
+            "--no-sweep-hbonds",
+        ])
+        assert result.exit_code == 0, result.output
+        out = tmp_path / "no_lig_h_relaxed.pdb"
+        assert out.exists()
+
+        # Output should still have ligand H atoms (added from mol)
+        lig_h = sum(
+            1 for l in out.read_text().splitlines()
+            if l[:6].strip() == "HETATM" and l[76:78].strip() == "H"
+        )
+        assert lig_h > 0, "Output should contain ligand H atoms"
+
+
 class TestErrorHandling:
     """Bad inputs should fail with helpful messages."""
 

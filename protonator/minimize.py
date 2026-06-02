@@ -73,13 +73,17 @@ def minimize_complex(
     ligand_text  = _extract_chain(pdb_text, "B")
 
     # ------------------------------------------------------------------
-    # 2. Load protein (no H) + ligand (with H) into OpenMM
+    # 2. Load protein (no H) + ligand into OpenMM
+    #    Always write the ligand from ligand_params.mol so that explicit H
+    #    atoms are present even when the input PDB has none.  The mol's heavy-
+    #    atom coordinates match the input (loaded from SDF or via
+    #    AssignBondOrdersFromTemplate); H coords come from RDKit AddHs.
     # ------------------------------------------------------------------
     with tempfile.TemporaryDirectory() as td:
         prot_path = Path(td) / "protein.pdb"
         lig_path  = Path(td) / "ligand.pdb"
         prot_path.write_text(protein_text)
-        lig_path.write_text(_add_conect_records(ligand_text, ligand_params.mol))
+        lig_path.write_text(_mol_to_ligand_pdb(ligand_params.mol))
         prot_pdb = app.PDBFile(str(prot_path))
         lig_pdb  = app.PDBFile(str(lig_path))
 
@@ -210,6 +214,56 @@ def _add_restraints(
             force.addParticle(atom.index, [x, y, z])
 
     system.addForce(force)
+
+
+def _mol_to_ligand_pdb(rdmol, resname: str = "LIG", chain: str = "B") -> str:
+    """
+    Write an RDKit molecule as a PDB string with HETATM + CONECT records.
+
+    Uses the molecule's existing conformer coordinates.  If H atoms are absent
+    they are added with 3-D coordinates via AddHs(addCoords=True) before writing.
+    This ensures the ligand always has explicit H regardless of the input PDB.
+    """
+    from rdkit.Chem import AllChem
+
+    mol = rdmol
+    if mol.GetNumAtoms() == sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() > 1):
+        # No H atoms present — add them with geometry
+        mol = AllChem.AddHs(mol, addCoords=True)
+
+    lines = []
+    conf = mol.GetConformer()
+    serial = 1
+    serial_map: dict[int, int] = {}   # rdmol atom idx → PDB serial
+
+    for atom in mol.GetAtoms():
+        pos = conf.GetAtomPosition(atom.GetIdx())
+        elem = atom.GetSymbol()
+        # Atom name: use PDB residue info name if available, else element+count
+        ri = atom.GetPDBResidueInfo()
+        if ri:
+            name = ri.GetName().strip()
+        else:
+            name = f"{elem}{serial}"
+        # PDB HETATM format
+        name_field = f" {name:<3s}" if len(name) < 4 else name[:4]
+        lines.append(
+            f"HETATM{serial:5d} {name_field:<4s} {resname:3s} {chain}{1:4d}    "
+            f"{pos.x:8.3f}{pos.y:8.3f}{pos.z:8.3f}"
+            f"  1.00  0.00          {elem:>2s}  "
+        )
+        serial_map[atom.GetIdx()] = serial
+        serial += 1
+
+    # CONECT records
+    for bond in mol.GetBonds():
+        i = serial_map[bond.GetBeginAtomIdx()]
+        j = serial_map[bond.GetEndAtomIdx()]
+        lines.append(f"CONECT{i:5d}{j:5d}")
+        lines.append(f"CONECT{j:5d}{i:5d}")
+
+    lines.append("END")
+    return "\n".join(lines) + "\n"
 
 
 def _add_conect_records(ligand_pdb_text: str, rdmol) -> str:
