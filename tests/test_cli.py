@@ -195,6 +195,47 @@ class TestUnprotonatedLigand:
         assert self._count_lig_h(out) > 0, "Output should contain ligand H atoms"
 
 
+class TestApo:
+    """--apo flag: minimise protein only, strip ligand."""
+
+    def test_apo_runs_and_writes_output(self, tmp_path):
+        result = runner.invoke(app, [
+            str(INPUT_PDB),
+            "--apo",
+            "--output-dir", str(tmp_path),
+            "--max-iterations", "10",
+        ])
+        assert result.exit_code == 0, result.output
+        out = tmp_path / "nise_iter_012-197_sample_0_relaxed.pdb"
+        assert out.exists()
+
+    def test_apo_output_has_no_ligand(self, tmp_path):
+        runner.invoke(app, [
+            str(INPUT_PDB), "--apo",
+            "--output-dir", str(tmp_path), "--max-iterations", "10",
+        ])
+        out = tmp_path / "nise_iter_012-197_sample_0_relaxed.pdb"
+        hetatm = [l for l in out.read_text().splitlines() if l[:6].strip() == "HETATM"]
+        assert len(hetatm) == 0, "Apo output should contain no HETATM records"
+
+    def test_apo_output_has_protein_hydrogens(self, tmp_path):
+        runner.invoke(app, [
+            str(INPUT_PDB), "--apo",
+            "--output-dir", str(tmp_path), "--max-iterations", "10",
+        ])
+        out = tmp_path / "nise_iter_012-197_sample_0_relaxed.pdb"
+        assert _count_h(out) > _count_h_input()
+
+    def test_apo_ignores_ligand_flags(self, tmp_path):
+        """--apo should succeed even when --smiles is also provided."""
+        result = runner.invoke(app, [
+            str(INPUT_PDB), "--apo",
+            "--smiles", LIGAND_SMILES,
+            "--output-dir", str(tmp_path), "--max-iterations", "10",
+        ])
+        assert result.exit_code == 0, result.output
+
+
 class TestErrorHandling:
     """Bad inputs should fail with helpful messages."""
 

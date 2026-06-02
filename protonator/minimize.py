@@ -160,6 +160,69 @@ def minimize_complex(
         app.PDBFile.writeFile(modeller.topology, final_pos, fh)
 
 
+def minimize_apo(
+    pdb_path: str | Path,
+    output_path: str | Path,
+    *,
+    restraint_k: float = 50.0,
+    ph: float = 7.4,
+    tolerance: float = 10.0,
+    max_iterations: int = 0,
+) -> None:
+    """
+    Protonate and energy-minimise the protein chain only (no ligand).
+
+    Equivalent to minimize_complex but strips chain B before processing.
+    Backbone heavy atoms are restrained; sidechains and all H atoms are free.
+    """
+    pdb_path = Path(pdb_path)
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    protein_text = _extract_chain(pdb_path.read_text(), "A")
+
+    with tempfile.TemporaryDirectory() as td:
+        prot_path = Path(td) / "protein.pdb"
+        prot_path.write_text(protein_text)
+        prot_pdb = app.PDBFile(str(prot_path))
+
+    ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+
+    modeller = app.Modeller(prot_pdb.topology, prot_pdb.positions)
+    modeller.addHydrogens(ff, pH=ph)
+
+    system = ff.createSystem(
+        modeller.topology,
+        nonbondedMethod=app.NoCutoff,
+        soluteDielectric=1.0,
+        solventDielectric=78.5,
+    )
+
+    _add_restraints(system, modeller.topology, modeller.positions,
+                    restraint_k, freeze_ligand=False)
+
+    import os
+    platform = openmm.Platform.getPlatformByName("CPU")
+    platform_props = {}
+    if "OMP_NUM_THREADS" in os.environ:
+        platform_props["Threads"] = os.environ["OMP_NUM_THREADS"]
+
+    integrator = openmm.LangevinIntegrator(
+        300 * unit.kelvin, 1.0 / unit.picosecond, 0.002 * unit.picoseconds,
+    )
+    sim = app.Simulation(modeller.topology, system, integrator,
+                         platform, platform_props)
+    sim.context.setPositions(modeller.positions)
+    sim.minimizeEnergy(
+        tolerance=tolerance * unit.kilojoules_per_mole / unit.nanometer,
+        maxIterations=max_iterations,
+    )
+
+    state = sim.context.getState(getPositions=True)
+    with open(output_path, "w") as fh:
+        app.PDBFile.writeFile(modeller.topology, state.getPositions(), fh)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
