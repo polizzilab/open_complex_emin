@@ -23,7 +23,8 @@ def _init_worker(threads_per_worker: int) -> None:
     import os
     t = str(threads_per_worker)
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                "OPENMM_CPU_THREADS"):
         os.environ[var] = t
 
 
@@ -57,7 +58,7 @@ def _process_target(args: tuple) -> tuple[str, str | None]:
             from protonator.ligand import prepare_ligand
             from protonator.minimize import minimize_complex
             ligand_params = prepare_ligand(str(sdf), is_file=True)
-            minimize_complex(pdb, ligand_params, out, tolerance=30.0)
+            minimize_complex(pdb, ligand_params, out)
             return name, None
         except Exception:
             return name, traceback.format_exc()

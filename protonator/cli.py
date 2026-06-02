@@ -1,5 +1,7 @@
 """Command-line interface for the protonator pipeline."""
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
 from pathlib import Path
 from typing import Optional
@@ -18,21 +20,25 @@ def main(
     output_dir: Path = typer.Option(Path("output"), "--output-dir", "-o", help="Output directory"),
     ph: float = typer.Option(7.4, "--ph", help="pH for protonation state assignment"),
     restraint_k: float = typer.Option(50.0, "--restraint-k", help="Backbone/ligand restraint (kcal/mol/Å²)"),
-    tolerance: float = typer.Option(10.0, "--tolerance", help="Minimisation convergence (kJ/mol/nm)"),
+    tolerance: float = typer.Option(30.0, "--tolerance", help="Minimisation convergence (kJ/mol/nm)"),
     recompute_ligand: bool = typer.Option(False, "--recompute-ligand", help="Recompute GAFF2/xTB per structure"),
     freeze_ligand: bool = typer.Option(True, "--freeze-ligand/--no-freeze-ligand", help="Restrain ligand heavy atoms during minimisation"),
     sweep_hbonds: bool = typer.Option(True, "--sweep-hbonds/--no-sweep-hbonds", help="Post-minimisation sweep of SER/THR/TYR hydroxyl orientations to prefer ligand H-bonds (default: on)"),
     max_iterations: int = typer.Option(0, "--max-iterations", help="Max minimisation steps; 0 = run until convergence"),
+    suffix: Optional[str] = typer.Option(None, "--suffix", help="Custom suffix for output file (default: _emin.pdb or _emin_apo.pdb if --apo)"),
 ) -> None:
     """
-    Protonate and energy-minimise a protein–ligand complex from an AF3-style PDB.
+    Protonate and energy-minimise a protein-ligand complex from an AF3-style PDB.
 
     Exactly one of --smiles or --ligand-file must be supplied, unless --apo is
     used in which case the ligand is ignored and only chain A is processed.
     """
     from .minimize import minimize_complex, minimize_apo
 
-    output_path = output_dir / (pdb.stem + "_relaxed.pdb")
+    if not suffix:
+        output_path = output_dir / (pdb.stem + ("_emin.pdb" if not apo else "_emin_apo.pdb"))
+    else:
+        output_path = output_dir / (pdb.stem + suffix)
 
     if apo:
         typer.echo(f"Protonating and minimising {pdb.name} (apo) …")

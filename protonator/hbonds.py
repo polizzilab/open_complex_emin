@@ -7,6 +7,8 @@ machinery is not used — only the distance+angle validation logic and the
 donor/acceptor identification rules.
 """
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
 import io
 import math

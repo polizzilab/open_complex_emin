@@ -6,8 +6,10 @@ protein sidechains and all hydrogens (including ligand H) are free.
 Implicit solvent: GBn2.
 """
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
-import tempfile
+import io
 from pathlib import Path
 
 import numpy as np
@@ -79,13 +81,10 @@ def minimize_complex(
     #    atom coordinates match the input (loaded from SDF or via
     #    AssignBondOrdersFromTemplate); H coords come from RDKit AddHs.
     # ------------------------------------------------------------------
-    with tempfile.TemporaryDirectory() as td:
-        prot_path = Path(td) / "protein.pdb"
-        lig_path  = Path(td) / "ligand.pdb"
-        prot_path.write_text(_ensure_oxt(protein_text))
-        lig_path.write_text(_mol_to_ligand_pdb(ligand_params.mol))
-        prot_pdb = app.PDBFile(str(prot_path))
-        lig_pdb  = app.PDBFile(str(lig_path))
+    prot_stream = io.StringIO(_ensure_oxt(protein_text))
+    lig_stream = io.StringIO(_mol_to_ligand_pdb(ligand_params.mol))
+    prot_pdb = app.PDBFile(prot_stream)
+    lig_pdb  = app.PDBFile(lig_stream)
 
     # ------------------------------------------------------------------
     # 3. Build force field (needed before addHydrogens so it can evaluate
@@ -93,7 +92,7 @@ def minimize_complex(
     # ------------------------------------------------------------------
     ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
     ff.registerTemplateGenerator(
-        make_gaff2_generator(ligand_params.gaff_xml)
+        make_gaff2_generator(ligand_params.gaff_xml, lig_resname="LIG")
     )
 
     # ------------------------------------------------------------------
@@ -181,10 +180,8 @@ def minimize_apo(
 
     protein_text = _extract_chain(pdb_path.read_text(), "A")
 
-    with tempfile.TemporaryDirectory() as td:
-        prot_path = Path(td) / "protein.pdb"
-        prot_path.write_text(_ensure_oxt(protein_text))
-        prot_pdb = app.PDBFile(str(prot_path))
+    pdb_stream = io.StringIO(_ensure_oxt(protein_text))
+    prot_pdb = app.PDBFile(pdb_stream)
 
     ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
 

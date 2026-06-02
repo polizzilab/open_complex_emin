@@ -1,5 +1,7 @@
 """Ligand parameter preparation: GFN2-xTB partial charges + GAFF2 FFXML."""
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
 from dataclasses import dataclass
 

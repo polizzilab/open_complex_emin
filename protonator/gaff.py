@@ -7,8 +7,10 @@ that simply loads it into whatever ForceField it encounters — no subprocess
 calls at minimisation time.
 """
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
-from io import StringIO
+import io
 
 import numpy as np
 from rdkit import Chem
@@ -44,7 +46,7 @@ def make_gaff2_generator(gaff_xml: str, lig_resname: str = "LIG"):
     def generator(forcefield, residue):
         if residue.name != lig_resname:
             return False
-        forcefield.loadFile(StringIO(gaff_xml))
+        forcefield.loadFile(io.StringIO(gaff_xml))
         return True
 
     return generator
