@@ -89,7 +89,7 @@ def minimize_complex(
     # ------------------------------------------------------------------
     ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
     ff.registerTemplateGenerator(
-        make_gaff2_generator(ligand_params.mol, ligand_params.charges)
+        make_gaff2_generator(ligand_params.gaff_xml)
     )
 
     # ------------------------------------------------------------------
@@ -144,7 +144,7 @@ def minimize_complex(
 
     if sweep_hbonds:
         pos_nm = np.array([[v.x, v.y, v.z] for v in final_pos.value_in_unit(unit.nanometer)])
-        pos_nm = _sweep_ser_thr(modeller.topology, pos_nm)
+        pos_nm = _sweep_ser_thr(modeller.topology, pos_nm, rdmol=ligand_params.mol)
         final_pos = unit.Quantity(
             [openmm.Vec3(*row) for row in pos_nm], unit.nanometer
         )
@@ -253,8 +253,8 @@ _HYDROXYL = {
     "THR": ("OG1", "HG1", "CB"),
     "TYR": ("OH",  "HH",  "CZ"),  # included for completeness
 }
-# Residue names that could act as H-bond acceptors (backbone + polar sc)
-_ACCEPTOR_ELEMENTS = {"O", "N", "F", "S"}
+# Ligand elements that can act as H-bond acceptors (fluorine excluded per bunsalyze rules)
+_ACCEPTOR_ELEMENTS = {"O", "N", "S"}
 
 
 def _rotate(point: np.ndarray, origin: np.ndarray, axis: np.ndarray, theta: float) -> np.ndarray:
@@ -266,97 +266,193 @@ def _rotate(point: np.ndarray, origin: np.ndarray, axis: np.ndarray, theta: floa
                      + axis * np.dot(axis, v) * (1 - np.cos(theta)))
 
 
-def _hbond_score(h_pos: np.ndarray, donor_pos: np.ndarray, acc_pos: np.ndarray) -> float:
+def _build_lig_acceptor_info(
+    rdmol: "Chem.Mol",
+    topology: app.Topology,
+    pos_nm: np.ndarray,
+) -> dict[int, tuple[str, str, bool, list]]:
     """
-    Continuous H-bond quality score in [0, 1]: 1 = perfect geometry, 0 = invalid.
-    All positions in nm.  Uses the same distance + angle criteria as bunsalyze.
-    """
-    # Thresholds converted to nm (bunsalyze uses Å)
-    D_DA_MAX = 0.35   # 3.5 Å
-    D_DA_MIN = 0.15   # 1.5 Å
-    D_HA_MAX = 0.25   # 2.5 Å
-    D_HA_MIN = 0.05   # 0.5 Å
+    For each ligand acceptor atom in the topology, return a dict:
+        topology_atom_idx → (atom_name, element, is_aromatic_planar, covalent_bonded_heavy_atoms)
 
-    d_da = np.linalg.norm(donor_pos - acc_pos)
-    if d_da > D_DA_MAX or d_da < D_DA_MIN:
-        return 0.0
-    d_ha = np.linalg.norm(h_pos - acc_pos)
-    if d_ha > D_HA_MAX or d_ha < D_HA_MIN:
-        return 0.0
-    dv = h_pos - donor_pos
-    av = h_pos - acc_pos
-    cos = np.dot(dv, av) / (np.linalg.norm(dv) * np.linalg.norm(av) + 1e-9)
-    angle = np.degrees(np.arccos(np.clip(cos, -1, 1)))
-    if angle < 110:
-        return 0.0
-    return (1 - d_ha / D_HA_MAX) * (angle - 110) / 70
+    is_aromatic_planar and covalent_bonded_heavy_atoms follow bunsalyze's
+    calc_ligand_dons_accs.py: is_aromatic_planar is True for sp2 N with exactly
+    2 heavy-atom bonds and no H (lone-pair geometry check needed in is_valid_hbond).
+    Bonded heavy atom coords come from the current topology positions (post-
+    minimisation) so the geometry is consistent with the sweep.
+    """
+    from rdkit import Chem as _Chem
+    from .hbonds import BondedHeavyAtom
+
+    ANG = 10.0  # nm → Å
+
+    # Match topology ligand atoms to rdmol atoms by nearest position
+    mol_pos_ang = rdmol.GetConformer().GetPositions()   # (N, 3) Å
+    topo_lig = [
+        a for a in topology.atoms()
+        if a.residue.name == "LIG" and a.element is not None
+    ]
+    topo_pos_ang = np.array([pos_nm[a.index] * ANG for a in topo_lig])
+
+    # Build topo_atom_index → rdmol_atom_index by nearest position
+    topo_to_rdmol: dict[int, int] = {}
+    for ti, ta in enumerate(topo_lig):
+        dists = np.linalg.norm(mol_pos_ang - topo_pos_ang[ti], axis=1)
+        topo_to_rdmol[ta.index] = int(np.argmin(dists))
+
+    # Build rdmol_idx → topo_atom for reverse lookup
+    rdmol_to_topo: dict[int, int] = {v: k for k, v in topo_to_rdmol.items()}
+
+    result: dict[int, tuple] = {}
+    for topo_atom in topo_lig:
+        elem = topo_atom.element.symbol
+        if elem not in _ACCEPTOR_ELEMENTS:
+            continue
+
+        rdidx = topo_to_rdmol[topo_atom.index]
+        rdatom = rdmol.GetAtomWithIdx(rdidx)
+
+        n_heavy_bonds = sum(
+            1 for b in rdatom.GetBonds()
+            if b.GetOtherAtom(rdatom).GetAtomicNum() > 1
+        )
+        hyb = rdatom.GetHybridization()
+        nH  = rdatom.GetTotalNumHs()
+
+        # Bunsalyze rule: sp2, exactly 2 heavy neighbours, pure acceptor
+        is_planar = (
+            n_heavy_bonds == 2
+            and hyb == _Chem.rdchem.HybridizationType.SP2
+            and nH == 0
+        )
+
+        # covalent_bonded_heavy_atoms using current topology positions
+        cov = []
+        for bond in rdatom.GetBonds():
+            other = bond.GetOtherAtom(rdatom)
+            if other.GetAtomicNum() <= 1:
+                continue
+            other_topo_idx = rdmol_to_topo.get(other.GetIdx())
+            if other_topo_idx is None:
+                continue
+            cov.append(BondedHeavyAtom(
+                name=other.GetSymbol() + str(other.GetIdx()),
+                element=other.GetSymbol(),
+                coord=pos_nm[other_topo_idx] * ANG,
+            ))
+
+        ri = rdatom.GetPDBResidueInfo()
+        aname = ri.GetName().strip() if ri else f"{elem}{rdidx}"
+
+        result[topo_atom.index] = (aname, elem, is_planar, cov)
+
+    return result
 
 
 def _sweep_ser_thr(
     topology: app.Topology,
-    pos_nm: np.ndarray,        # (N_atoms, 3) in nm, will be modified in-place copy
-    step_deg: float = 5.0,
-    search_radius_nm: float = 0.45,   # 4.5 Å — candidate acceptor search sphere
+    pos_nm: np.ndarray,                  # (N_atoms, 3) in nm
+    rdmol: "Chem.Mol | None" = None,     # ligand mol for is_aromatic_planar lookup
+    step_deg: float = 10.0,
+    search_radius_nm: float = 0.45,      # 4.5 Å candidate search sphere
 ) -> np.ndarray:
     """
     For each SER/THR/TYR residue, sweep the hydroxyl dihedral and replace the
-    current H position with the orientation that best H-bonds a **ligand** atom.
+    current H position with the orientation that best H-bonds a ligand atom.
 
-    If no orientation forms a valid ligand H-bond, the H is left unchanged.
-    The updated positions array (nm) is returned.
+    Uses bunsalyze's is_valid_hbond with correct is_aromatic_planar and
+    covalent_bonded_heavy_atoms for sp2 N acceptors.  Fluorine excluded.
+    Returns a copy of pos_nm with updated H positions.
     """
-    pos = pos_nm.copy()
+    from .hbonds import is_valid_hbond, PolarAtom, DonorHydrogen
+
+    ANG = 10.0   # nm → Å
+
+    pos    = pos_nm.copy()
     angles = np.deg2rad(np.arange(0, 360, step_deg))
 
-    # Index topology atoms for fast lookup
-    idx: dict[tuple, int] = {}          # (res_index, atom_name) -> atom index
-    for atom in topology.atoms():
-        idx[(atom.residue.index, atom.name)] = atom.index
+    atom_idx: dict[tuple, int] = {
+        (a.residue.index, a.name): a.index for a in topology.atoms()
+    }
 
-    # Collect ligand acceptor indices
-    lig_acceptors = [
-        atom.index for atom in topology.atoms()
-        if atom.residue.name == "LIG"
-        and atom.element is not None
-        and atom.element.symbol in _ACCEPTOR_ELEMENTS
-        and atom.element.symbol != "H"
-    ]
+    # Pre-build acceptor info (includes is_aromatic_planar and bonded heavy atoms)
+    acc_info: dict[int, tuple] = {}
+    if rdmol is not None:
+        acc_info = _build_lig_acceptor_info(rdmol, topology, pos_nm)
+    else:
+        # Fallback: element only, no aromatic planar check
+        for a in topology.atoms():
+            if a.residue.name == "LIG" and a.element and a.element.symbol in _ACCEPTOR_ELEMENTS:
+                acc_info[a.index] = (a.name, a.element.symbol, False, [])
 
     for residue in topology.residues():
         if residue.name not in _HYDROXYL:
             continue
-        o_name, h_name, axis_name = _HYDROXYL[residue.name]
+        o_name, h_name, ax_name = _HYDROXYL[residue.name]
 
-        o_idx   = idx.get((residue.index, o_name))
-        h_idx   = idx.get((residue.index, h_name))
-        ax_idx  = idx.get((residue.index, axis_name))
+        o_idx  = atom_idx.get((residue.index, o_name))
+        h_idx  = atom_idx.get((residue.index, h_name))
+        ax_idx = atom_idx.get((residue.index, ax_name))
         if any(x is None for x in [o_idx, h_idx, ax_idx]):
             continue
 
         o_pos  = pos[o_idx]
         h_pos  = pos[h_idx]
-        ax_pos = pos[ax_idx]
-        axis   = o_pos - ax_pos   # rotation axis: axis_atom → O
+        axis   = o_pos - pos[ax_idx]
 
-        # Candidate acceptors within search radius
-        lig_cands = [
-            i for i in lig_acceptors
-            if np.linalg.norm(pos[i] - o_pos) <= search_radius_nm
+        # Candidates within search radius
+        cands = [
+            (ai, info) for ai, info in acc_info.items()
+            if np.linalg.norm(pos[ai] - o_pos) <= search_radius_nm
         ]
-        if not lig_cands:
-            continue   # no ligand atom close enough — nothing to do
+        if not cands:
+            continue
 
-        # Sweep and score each candidate ligand acceptor
-        best_score = 0.0
-        best_h_pos = None
+        best_ha_dist = np.inf
+        best_h_pos   = None
 
         for theta in angles:
-            h_trial = _rotate(h_pos, o_pos, axis, theta)
-            for acc_idx in lig_cands:
-                score = _hbond_score(h_trial, o_pos, pos[acc_idx])
-                if score > best_score:
-                    best_score = score
-                    best_h_pos = h_trial
+            h_trial_nm  = _rotate(h_pos, o_pos, axis, theta)
+            h_trial_ang = h_trial_nm * ANG
+
+            donor_h  = DonorHydrogen(h_name, h_trial_ang)
+            donor_pa = PolarAtom(
+                name=o_name,
+                coord=o_pos * ANG,
+                donor_count=1,
+                acceptor_count=1,
+                parent_group_identifier=("A", residue.name, residue.index, ""),
+                element="O",
+                is_ligand_atom=False,
+                donor_hydrogens=[donor_h],
+                is_aromatic_planar=False,
+                covalent_bonded_heavy_atoms=[],
+                is_buried=True,
+            )
+
+            for acc_idx, (aname, acc_elem, is_planar, cov) in cands:
+                # cov coords already reflect post-minimisation positions
+                # (set by _build_lig_acceptor_info); only H atoms move in the sweep.
+                acc_pa = PolarAtom(
+                    name=aname,
+                    coord=pos[acc_idx] * ANG,
+                    donor_count=0,
+                    acceptor_count=2,
+                    parent_group_identifier=("B", "LIG", 1, ""),
+                    element=acc_elem,
+                    is_ligand_atom=True,
+                    donor_hydrogens=[],
+                    is_aromatic_planar=is_planar,
+                    covalent_bonded_heavy_atoms=cov,
+                    is_buried=True,
+                )
+
+                if is_valid_hbond(donor_pa, donor_h, acc_pa, clash_check=False):
+                    ha_dist = np.linalg.norm(h_trial_ang - pos[acc_idx] * ANG)
+                    if ha_dist < best_ha_dist:
+                        best_ha_dist = ha_dist
+                        best_h_pos   = h_trial_nm
+                    break
 
         if best_h_pos is not None:
             pos[h_idx] = best_h_pos

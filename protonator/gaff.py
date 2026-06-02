@@ -1,42 +1,48 @@
 """
 GAFF2 residue template generator for OpenMM ForceField.
 
-Wraps GAFFTemplateGenerator (openmmforcefields) but injects caller-supplied
-partial charges so AM1-BCC is never called.  The filter on lig_resname avoids
-spurious graph-isomorphism checks against every protein residue.
+build_gaff2_ffxml() runs antechamber once and returns the FFXML string.
+make_gaff2_generator() takes that pre-built string and returns a fast closure
+that simply loads it into whatever ForceField it encounters — no subprocess
+calls at minimisation time.
 """
 from __future__ import annotations
+
+from io import StringIO
 
 import numpy as np
 from rdkit import Chem
 
 
-def make_gaff2_generator(rdmol: Chem.Mol, charges: list[float], lig_resname: str = "LIG"):
+def build_gaff2_ffxml(rdmol: Chem.Mol, charges: list[float]) -> str:
     """
-    Return a callable for ForceField.registerTemplateGenerator().
+    Run antechamber + parmchk2 via GAFFTemplateGenerator and return the
+    GAFF2 FFXML string for the ligand.
 
-    Parameters
-    ----------
-    rdmol:
-        RDKit molecule with explicit H and a 3-D conformer matching PDB coords.
-    charges:
-        Partial charges (elementary charge) in rdmol atom order.
-    lig_resname:
-        Residue name used in the PDB / OpenMM topology (default "LIG").
+    This is the expensive step (antechamber subprocess).  Call it once per
+    ligand identity, store the result in LigandParams.gaff_xml, and reuse
+    across all binder structures.
     """
     from openff.toolkit import Molecule as OFFMol
     from openff.units import unit as off_unit
     from openmmforcefields.generators import GAFFTemplateGenerator
 
     off_mol = OFFMol.from_rdkit(rdmol, allow_undefined_stereo=True)
-    # Pre-set charges → GAFFTemplateGenerator skips AM1-BCC and uses these
     off_mol.partial_charges = np.array(charges) * off_unit.elementary_charge
 
     gaff = GAFFTemplateGenerator(molecules=[off_mol], forcefield="gaff-2.11")
+    return gaff.generate_residue_template(off_mol)
 
+
+def make_gaff2_generator(gaff_xml: str, lig_resname: str = "LIG"):
+    """
+    Return a callable for ForceField.registerTemplateGenerator() that loads
+    a pre-computed GAFF2 FFXML string.  No subprocess calls at runtime.
+    """
     def generator(forcefield, residue):
         if residue.name != lig_resname:
             return False
-        return gaff.generator(forcefield, residue)
+        forcefield.loadFile(StringIO(gaff_xml))
+        return True
 
     return generator

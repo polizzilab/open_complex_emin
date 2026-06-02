@@ -1,4 +1,4 @@
-"""Ligand parameter preparation: GFN2-xTB partial charges via tblite."""
+"""Ligand parameter preparation: GFN2-xTB partial charges + GAFF2 FFXML."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,11 +12,18 @@ _BOHR_PER_ANG = 1.8897259886
 
 @dataclass
 class LigandParams:
-    """Per-ligand-identity parameters.  Picklable — safe for multiprocessing."""
+    """
+    Per-ligand-identity parameters.  Picklable — safe for multiprocessing.
+
+    All expensive computation (xTB charges, antechamber/GAFF2) runs once in
+    prepare_ligand().  Workers call minimize_complex() with the same
+    LigandParams instance and pay no per-structure parameterisation cost.
+    """
 
     smiles: str
     charges: list[float]   # GFN2-xTB Mulliken charges, atom order = rdmol atom order
     mol_block: str         # MDL V2000 mol block, removeHs=False
+    gaff_xml: str          # pre-computed GAFF2 FFXML; loaded directly into ForceField
 
     @property
     def mol(self) -> Chem.Mol:
@@ -29,7 +36,7 @@ class LigandParams:
 
 def prepare_ligand(mol_source: str, *, is_file: bool = False) -> LigandParams:
     """
-    Compute GFN2-xTB partial charges for the ligand.
+    Compute GFN2-xTB partial charges and GAFF2 parameters for the ligand.
 
     Parameters
     ----------
@@ -42,6 +49,10 @@ def prepare_ligand(mol_source: str, *, is_file: bool = False) -> LigandParams:
     -----
     When loading from a file the 3-D coordinates are used as-is.
     When loading from SMILES a conformer is generated via ETKDGv3 + MMFF94.
+
+    Both the xTB charge calculation (tblite) and the GAFF2 parameterisation
+    (antechamber subprocess via openmmforcefields) run here.  Call this once
+    per ligand identity and reuse the result across all structures.
     """
     if is_file:
         mol = Chem.MolFromMolFile(mol_source, removeHs=False, sanitize=True)
@@ -61,10 +72,15 @@ def prepare_ligand(mol_source: str, *, is_file: bool = False) -> LigandParams:
         smiles = mol_source
 
     charges = _xtb_charges(mol)
+
+    from .gaff import build_gaff2_ffxml
+    gaff_xml = build_gaff2_ffxml(mol, charges)
+
     return LigandParams(
         smiles=smiles,
         charges=charges,
         mol_block=Chem.MolToMolBlock(mol),
+        gaff_xml=gaff_xml,
     )
 
 
