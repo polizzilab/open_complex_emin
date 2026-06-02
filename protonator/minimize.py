@@ -393,88 +393,127 @@ def _build_lig_acceptor_info(
         topology_atom_idx → (atom_name, element, is_aromatic_planar,
                              covalent_bonded_heavy_atoms, donor_hydrogens)
 
-    is_aromatic_planar and covalent_bonded_heavy_atoms follow bunsalyze's
-    calc_ligand_dons_accs.py.  donor_hydrogens is populated so that
-    is_valid_hbond can perform H-H clash checking (H_TO_H_CLASH_DIST = 1.5 Å)
-    and reject sweep orientations where the incoming protein OH clashes with
-    a hydrogen already on the ligand acceptor atom.
+    Atom mapping uses GetSubstructMatches (graph isomorphism, same approach as
+    polizzilab/NISE calc_symmetry_aware_rmsd.py) so it is robust to atom
+    reordering between the rdmol and the topology PDB.
+
+    donor_hydrogens uses current post-minimisation topology positions so that
+    the H-H clash check in is_valid_hbond reflects the actual geometry.
     """
     from rdkit import Chem as _Chem
+    from rdkit.Chem import AllChem
     from .hbonds import BondedHeavyAtom, DonorHydrogen
+    import io as _io
 
     ANG = 10.0  # nm → Å
 
-    # Match topology ligand atoms to rdmol atoms by nearest position
-    mol_pos_ang = rdmol.GetConformer().GetPositions()   # (N, 3) Å
-    topo_lig = [
-        a for a in topology.atoms()
-        if a.residue.name == "LIG" and a.element is not None
-    ]
-    topo_pos_ang = np.array([pos_nm[a.index] * ANG for a in topo_lig])
+    # ------------------------------------------------------------------ #
+    # 1. Write the current ligand topology state to a PDB block so we
+    #    can load it with RDKit and get PDB atom names.
+    # ------------------------------------------------------------------ #
+    topo_lig = [a for a in topology.atoms() if a.residue.name == "LIG"]
+    lines = []
+    for a in topo_lig:
+        p = pos_nm[a.index] * ANG
+        elem = a.element.symbol if a.element else "X"
+        lines.append(
+            f"HETATM{a.index:5d} {a.name:<4s} LIG B   1    "
+            f"{p[0]:8.3f}{p[1]:8.3f}{p[2]:8.3f}  1.00  0.00          {elem:>2s}  "
+        )
+    lines.append("END")
+    pdb_block = "\n".join(lines)
 
-    # Build topo_atom_index → rdmol_atom_index by nearest position
-    topo_to_rdmol: dict[int, int] = {}
-    for ti, ta in enumerate(topo_lig):
-        dists = np.linalg.norm(mol_pos_ang - topo_pos_ang[ti], axis=1)
-        topo_to_rdmol[ta.index] = int(np.argmin(dists))
+    pdb_mol_raw = _Chem.MolFromPDBBlock(pdb_block, removeHs=False, sanitize=False)
+    if pdb_mol_raw is None:
+        return {}
 
-    # Build rdmol_idx → topo_atom for reverse lookup
-    rdmol_to_topo: dict[int, int] = {v: k for k, v in topo_to_rdmol.items()}
+    # Assign correct bond orders from rdmol template
+    try:
+        pdb_mol = AllChem.AssignBondOrdersFromTemplate(rdmol, pdb_mol_raw)
+        _Chem.SanitizeMol(pdb_mol)
+    except Exception:
+        pdb_mol = pdb_mol_raw
 
+    # ------------------------------------------------------------------ #
+    # 2. Map rdmol atom idx → pdb_mol atom idx via GetSubstructMatches.
+    #    pdb_mol.GetSubstructMatches(rdmol): match[i] = pdb_mol atom that
+    #    corresponds to rdmol atom i.
+    # ------------------------------------------------------------------ #
+    matches = pdb_mol.GetSubstructMatches(rdmol, uniquify=False)
+    if not matches:
+        return {}
+    match = matches[0]   # rdmol_idx → pdb_mol_idx
+    rdmol_to_pdb: dict[int, int] = {ri: pi for ri, pi in enumerate(match)}
+
+    # pdb_mol atom name → topology atom index (for position lookup)
+    pdb_name_to_topo: dict[str, int] = {}
+    for a in topo_lig:
+        pdb_name_to_topo[a.name] = a.index
+
+    # ------------------------------------------------------------------ #
+    # 3. Build acceptor info for each N/O/S ligand atom
+    # ------------------------------------------------------------------ #
     result: dict[int, tuple] = {}
-    for topo_atom in topo_lig:
-        elem = topo_atom.element.symbol
+
+    for rdidx, rdatom in enumerate(rdmol.GetAtoms()):
+        if rdatom.GetAtomicNum() <= 1:
+            continue
+        elem = rdatom.GetSymbol()
         if elem not in _ACCEPTOR_ELEMENTS:
             continue
 
-        rdidx = topo_to_rdmol[topo_atom.index]
-        rdatom = rdmol.GetAtomWithIdx(rdidx)
+        pdb_idx = rdmol_to_pdb.get(rdidx)
+        if pdb_idx is None:
+            continue
+        pdb_atom = pdb_mol.GetAtomWithIdx(pdb_idx)
+        ri = pdb_atom.GetPDBResidueInfo()
+        aname = ri.GetName().strip() if ri else f"{elem}{rdidx}"
+        topo_idx = pdb_name_to_topo.get(aname)
+        if topo_idx is None:
+            continue
 
-        n_heavy_bonds = sum(
-            1 for b in rdatom.GetBonds()
-            if b.GetOtherAtom(rdatom).GetAtomicNum() > 1
-        )
-        hyb = rdatom.GetHybridization()
-        nH  = rdatom.GetTotalNumHs()
-
-        # Bunsalyze rule: sp2, exactly 2 heavy neighbours, pure acceptor
+        n_heavy = sum(1 for b in rdatom.GetBonds() if b.GetOtherAtom(rdatom).GetAtomicNum() > 1)
+        hyb     = rdatom.GetHybridization()
+        nH      = rdatom.GetTotalNumHs()
         is_planar = (
-            n_heavy_bonds == 2
+            n_heavy == 2
             and hyb == _Chem.rdchem.HybridizationType.SP2
             and nH == 0
         )
 
-        # covalent_bonded_heavy_atoms using current topology positions
+        # covalent_bonded_heavy_atoms — current topology positions
         cov = []
         for bond in rdatom.GetBonds():
             other = bond.GetOtherAtom(rdatom)
             if other.GetAtomicNum() <= 1:
                 continue
-            other_topo_idx = rdmol_to_topo.get(other.GetIdx())
-            if other_topo_idx is None:
+            o_pdb_idx = rdmol_to_pdb.get(other.GetIdx())
+            if o_pdb_idx is None:
                 continue
-            cov.append(BondedHeavyAtom(
-                name=other.GetSymbol() + str(other.GetIdx()),
-                element=other.GetSymbol(),
-                coord=pos_nm[other_topo_idx] * ANG,
-            ))
+            o_ri = pdb_mol.GetAtomWithIdx(o_pdb_idx).GetPDBResidueInfo()
+            o_name = o_ri.GetName().strip() if o_ri else f"{other.GetSymbol()}{other.GetIdx()}"
+            o_topo = pdb_name_to_topo.get(o_name)
+            if o_topo is None:
+                continue
+            cov.append(BondedHeavyAtom(o_name, other.GetSymbol(), pos_nm[o_topo] * ANG))
 
-        # donor_hydrogens: H atoms covalently bonded to this acceptor,
-        # needed by is_valid_hbond's H-H clash check.
+        # donor_hydrogens — H atoms bonded to this acceptor, current positions
         donor_hs: list = []
-        conf = rdmol.GetConformer()
         for bond in rdatom.GetBonds():
             other = bond.GetOtherAtom(rdatom)
-            if other.GetAtomicNum() == 1:
-                h_coord_ang = np.array(conf.GetAtomPosition(other.GetIdx()))
-                ori = other.GetPDBResidueInfo()
-                hname = ori.GetName().strip() if ori else f"H{other.GetIdx()}"
-                donor_hs.append(DonorHydrogen(hname, h_coord_ang))
+            if other.GetAtomicNum() != 1:
+                continue
+            h_pdb_idx = rdmol_to_pdb.get(other.GetIdx())
+            if h_pdb_idx is None:
+                continue
+            h_ri = pdb_mol.GetAtomWithIdx(h_pdb_idx).GetPDBResidueInfo()
+            h_name = h_ri.GetName().strip() if h_ri else f"H{other.GetIdx()}"
+            h_topo = pdb_name_to_topo.get(h_name)
+            h_coord = pos_nm[h_topo] * ANG if h_topo is not None else None
+            if h_coord is not None:
+                donor_hs.append(DonorHydrogen(h_name, h_coord))
 
-        ri = rdatom.GetPDBResidueInfo()
-        aname = ri.GetName().strip() if ri else f"{elem}{rdidx}"
-
-        result[topo_atom.index] = (aname, elem, is_planar, cov, donor_hs)
+        result[topo_idx] = (aname, elem, is_planar, cov, donor_hs)
 
     return result
 
