@@ -7,8 +7,9 @@ From: ubuntu:22.04
     Source https://github.com/polizzilab/open_complex_emin
 
 %environment
-    # conda provides antechamber/parmchk2; .venv provides protonator and all Python deps
-    export PATH="/opt/miniforge3/bin:/opt/open_complex_emin/00_simple/.venv/bin:$PATH"
+    # ambertools conda env  → antechamber, parmchk2
+    # project .venv         → protonator and all Python deps
+    export PATH="/opt/miniforge3/envs/ambertools/bin:/opt/open_complex_emin/00_simple/.venv/bin:/opt/miniforge3/bin:$PATH"
     export CONDA_DEFAULT_ENV=base
 
 %post
@@ -32,22 +33,27 @@ From: ubuntu:22.04
     export PATH="/opt/miniforge3/bin:$PATH"
 
     # -----------------------------------------------------------------------
-    # Python 3.12 + AmberTools (antechamber, parmchk2) + uv via conda-forge
+    # uv via conda (base env) — used to manage Python 3.12 + .venv
+    # AmberTools in a dedicated conda env so it can use whatever Python it
+    # needs without conflicting with the project's Python 3.12 requirement.
     # -----------------------------------------------------------------------
-    conda install -y -n base -c conda-forge python=3.12 ambertools uv
-    conda clean -y --all
+    conda install -y -n base -c conda-forge uv
+    conda create  -y -n ambertools -c conda-forge ambertools
+    conda clean   -y --all
 
     # -----------------------------------------------------------------------
     # Clone protonator repo and install with uv — mirrors the normal workflow:
-    #   1.  uv sync        → creates .venv, installs all PyPI deps
-    #   2.  install_openff → installs openff stack from GitHub source into .venv
+    #   1.  uv python install 3.12  → uv fetches its own CPython 3.12 build
+    #   2.  uv sync                 → creates .venv, installs all PyPI deps
+    #   3.  install_openff          → openff stack from GitHub into .venv
     # -----------------------------------------------------------------------
     git clone --depth 1 \
         https://github.com/polizzilab/open_complex_emin.git \
         /opt/open_complex_emin
 
     cd /opt/open_complex_emin/00_simple
-    uv sync --python "$(which python3)"
+    uv python install 3.12
+    uv sync
     bash scripts/install_openff.sh
 
     # Tidy up pip/uv caches
