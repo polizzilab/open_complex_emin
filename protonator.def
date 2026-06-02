@@ -7,7 +7,8 @@ From: ubuntu:22.04
     Source https://github.com/polizzilab/open_complex_emin
 
 %environment
-    export PATH="/opt/miniforge3/bin:$PATH"
+    # conda provides antechamber/parmchk2; .venv provides protonator and all Python deps
+    export PATH="/opt/miniforge3/bin:/opt/open_complex_emin/00_simple/.venv/bin:$PATH"
     export CONDA_DEFAULT_ENV=base
 
 %post
@@ -21,7 +22,7 @@ From: ubuntu:22.04
         && rm -rf /var/lib/apt/lists/*
 
     # -----------------------------------------------------------------------
-    # Miniforge3 (fresh install in container — not the host miniforge)
+    # Fresh miniforge3 in /opt (not the host ~/miniforge3)
     # -----------------------------------------------------------------------
     wget -q \
         "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh" \
@@ -31,71 +32,35 @@ From: ubuntu:22.04
     export PATH="/opt/miniforge3/bin:$PATH"
 
     # -----------------------------------------------------------------------
-    # Python 3.12 + AmberTools (antechamber, parmchk2) via conda-forge
+    # Python 3.12 + AmberTools (antechamber, parmchk2) + uv via conda-forge
     # -----------------------------------------------------------------------
-    conda install -y -n base -c conda-forge python=3.12 ambertools
+    conda install -y -n base -c conda-forge python=3.12 ambertools uv
     conda clean -y --all
 
     # -----------------------------------------------------------------------
-    # Pip dependencies (from pyproject.toml)
-    # -----------------------------------------------------------------------
-    pip install --no-cache-dir \
-        "cachetools>=5.0" \
-        "lxml>=5.0" \
-        "networkx>=3.0" \
-        "openmm>=8.5.1" \
-        "openmmforcefields>=0.15.1" \
-        "packaging>=23.0" \
-        "parmed>=4.0" \
-        "pint>=0.23" \
-        "prody>=2.4" \
-        "python-constraint>=1.4" \
-        "rdkit>=2026.3.2" \
-        "tblite>=0.6" \
-        "tinydb>=4.0" \
-        "typer>=0.12"
-
-    # -----------------------------------------------------------------------
-    # openff stack — not on PyPI; install from GitHub source.
-    # Patches out versioningit (requires git history) and pins a static version.
-    # -----------------------------------------------------------------------
-    _patch_and_install() {
-        local url="$1"
-        local dst="/tmp/$(basename $url .git)"
-        git clone --quiet --depth 1 "$url" "$dst"
-        python3 - "$dst/pyproject.toml" << 'PYEOF'
-import re, sys, pathlib
-p = pathlib.Path(sys.argv[1])
-c = p.read_text()
-c = re.sub(r'"versioningit[^"]*"', '""', c)
-c = re.sub(r'"setuptools-scm[^"]*"', '""', c)
-c = re.sub(r'\ndynamic\s*=\s*\[.*?"version".*?\]', '\nversion = "0.0.1"',
-           c, flags=re.DOTALL)
-p.write_text(c)
-PYEOF
-        pip install --no-cache-dir --no-deps "$dst"
-        rm -rf "$dst"
-    }
-
-    _patch_and_install https://github.com/openforcefield/openff-utilities.git
-    _patch_and_install https://github.com/openforcefield/openff-units.git
-    _patch_and_install https://github.com/openforcefield/openff-toolkit.git
-
-    # -----------------------------------------------------------------------
-    # Install protonator from GitHub
+    # Clone protonator repo and install with uv — mirrors the normal workflow:
+    #   1.  uv sync        → creates .venv, installs all PyPI deps
+    #   2.  install_openff → installs openff stack from GitHub source into .venv
     # -----------------------------------------------------------------------
     git clone --depth 1 \
         https://github.com/polizzilab/open_complex_emin.git \
         /opt/open_complex_emin
-    pip install --no-cache-dir /opt/open_complex_emin/00_simple
 
-    pip cache purge
+    cd /opt/open_complex_emin/00_simple
+    uv sync --python "$(which python3)"
+    bash scripts/install_openff.sh
+
+    # Tidy up pip/uv caches
+    /opt/open_complex_emin/00_simple/.venv/bin/pip cache purge 2>/dev/null || true
 
 %runscript
     exec protonator "$@"
 
 %help
     Protein-ligand protonation and energy minimisation pipeline.
+
+    Build:
+        singularity build protonator.sif protonator.def
 
     Usage:
         # Holo (protein + ligand):
@@ -105,6 +70,5 @@ PYEOF
         # Apo (protein only):
         singularity run protonator.sif input.pdb --apo --output-dir out/
 
-    Or call specific executables:
-        singularity exec protonator.sif protonator --help
+        # Python API / arbitrary commands:
         singularity exec protonator.sif python -c "from protonator.ligand import prepare_ligand"
