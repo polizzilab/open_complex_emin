@@ -114,7 +114,7 @@ def protonate_batch(
                 continue
             entry = {**complex_template, "pdb_path": str(pdb_path), "output_path": str(out_path_holo), "apo_output_path": str(out_path_apo)}
             inputs_two_state.append(entry)
-        print(f"Prepared {len(inputs_two_state)} structures for two-state minimization." + (f"Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
+        print(f"Prepared {len(inputs_two_state)} structures for two-state minimization." + (f" Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
         with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
             for _ in track(pool.imap_unordered(minimize_two_state, inputs_two_state), total=len(inputs_two_state), description="Running two-state energy minimization…"):
                 pass
@@ -132,7 +132,7 @@ def protonate_batch(
                     "output_path": str(out_path),
                 })
                 inputs.append(apo_template.copy())
-            print(f"Prepared {len(inputs)} structures for apo minimization." + (f"Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
+            print(f"Prepared {len(inputs)} structures for apo minimization." + (f" Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
             with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
                 for _ in track(pool.imap_unordered(minimize_apo_pool, inputs), total=len(inputs), description=f"Running apo energy minimization…"):
                     pass
@@ -148,7 +148,7 @@ def protonate_batch(
                     "output_path": str(out_path),
                 })
                 inputs.append(complex_template.copy())
-            print(f"Prepared {len(inputs)} structures for holo minimization." + (f"Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
+            print(f"Prepared {len(inputs)} structures for holo minimization." + (f" Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
             with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
                 for _ in track(pool.imap_unordered(minimize_complex_pool, inputs), total=len(inputs), description=f"Running ligand-bound energy minimization…"):
                     pass
