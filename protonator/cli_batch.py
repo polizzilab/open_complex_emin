@@ -41,6 +41,7 @@ def protonate_batch(
     max_iterations: int = typer.Option(0, "--max-iterations", help="Max minimisation steps; 0 = run until convergence"),
     suffix: Optional[str] = typer.Option(None, "--suffix", help="Custom suffix for output files (default: _emin.pdb or _emin_apo.pdb if --apo)"),
     n_workers: int = typer.Option(1, "--n-workers", help="Number of parallel workers to use (default: 1, i.e. no parallelism)"),
+    resume: bool = typer.Option(False, "--resume", "-r", help="Skip structures whose output file(s) already exist"),
 ):
     """
     Protonate and energy-minimise a batch of protein-ligand complexes from a text file containing paths to PDBs with the same ligand.
@@ -84,6 +85,8 @@ def protonate_batch(
             out_path_holo = output_dir / (name + (suffix if suffix else "_emin.pdb"))
             apo_suffix = Path(suffix).stem + "_apo" + Path(suffix).suffix if suffix else "_emin_apo.pdb"
             out_path_apo = output_dir / (name + apo_suffix)
+            if resume and out_path_holo.exists() and out_path_apo.exists():
+                continue
             complex_template["pdb_path"] = str(pdb_path)
             complex_template["output_path"] = str(out_path_holo)
             inputs_holo.append(complex_template.copy())
@@ -101,6 +104,8 @@ def protonate_batch(
             for pdb_path in all_targets:
                 name = pdb_path.stem
                 out_path = output_dir / (name + (suffix if suffix else "_emin_apo.pdb"))
+                if resume and out_path.exists():
+                    continue
                 apo_template.update({
                     "pdb_path": str(pdb_path),
                     "output_path": str(out_path),
@@ -113,6 +118,8 @@ def protonate_batch(
             for pdb_path in all_targets:
                 name = pdb_path.stem
                 out_path = output_dir / (name + (suffix if suffix else "_emin.pdb"))
+                if resume and out_path.exists():
+                    continue
                 complex_template.update({
                     "pdb_path": str(pdb_path),
                     "output_path": str(out_path),
