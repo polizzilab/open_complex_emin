@@ -20,6 +20,12 @@ def _init_worker(threads_per_worker: int) -> None:
                 "OPENMM_CPU_THREADS"):
         os.environ[var] = t
 
+    # Prevent OpenMM from initializing the CUDA/OpenCL platform plugins at
+    # import time. Even when using the CPU platform exclusively, importing
+    # openmm probes all available platforms and allocates a CUDA context per
+    # worker process — holding GPU memory for the entire run with 0% utilization.
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
     try:
         import ctypes, ctypes.util
         _gomp = ctypes.util.find_library("gomp")
