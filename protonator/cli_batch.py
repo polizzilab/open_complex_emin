@@ -26,6 +26,30 @@ def minimize_complex_pool(inputs_dict: dict) -> None:
     minimize_complex(**inputs_dict)
 
 
+def minimize_two_state(inputs_dict: dict) -> None:
+    """Minimize both holo and apo states for one structure in a single pool worker.
+
+    Expects inputs_dict to contain all minimize_complex keys plus 'apo_output_path'
+    for the apo output file. Each state is skipped individually if its output already
+    exists, so partial runs (holo done, apo not) resume correctly with -r.
+    """
+    apo_output_path = Path(inputs_dict['apo_output_path'])
+    holo_inputs = {k: v for k, v in inputs_dict.items() if k != 'apo_output_path'}
+
+    if not Path(holo_inputs['output_path']).exists():
+        minimize_complex(**holo_inputs)
+
+    if not apo_output_path.exists():
+        minimize_apo(
+            pdb_path=inputs_dict['pdb_path'],
+            output_path=apo_output_path,
+            ph=inputs_dict['ph'],
+            restraint_k=inputs_dict['restraint_k'],
+            tolerance=inputs_dict['tolerance'],
+            max_iterations=inputs_dict['max_iterations'],
+        )
+
+
 @app.command()
 def protonate_batch(
     input_pdbs_txt_file: Path = typer.Argument(..., help="Text file with one PDB path per line (chain A = protein, chain B = ligand with H)"),
@@ -77,26 +101,22 @@ def protonate_batch(
         "ph": ph, "restraint_k": restraint_k, "tolerance": tolerance, "max_iterations": max_iterations,
     }
 
+    already_complete_count = 0
     if two_state:
-        inputs_apo = []
-        inputs_holo = []
+        inputs_two_state = []
         for pdb_path in all_targets:
             name = pdb_path.stem
             out_path_holo = output_dir / (name + (suffix if suffix else "_emin.pdb"))
             apo_suffix = Path(suffix).stem + "_apo" + Path(suffix).suffix if suffix else "_emin_apo.pdb"
             out_path_apo = output_dir / (name + apo_suffix)
             if resume and out_path_holo.exists() and out_path_apo.exists():
+                already_complete_count += 1
                 continue
-            complex_template["pdb_path"] = str(pdb_path)
-            complex_template["output_path"] = str(out_path_holo)
-            inputs_holo.append(complex_template.copy())
-            apo_template["pdb_path"] = str(pdb_path)
-            apo_template["output_path"] = str(out_path_apo)
-            inputs_apo.append(apo_template.copy())
+            entry = {**complex_template, "pdb_path": str(pdb_path), "output_path": str(out_path_holo), "apo_output_path": str(out_path_apo)}
+            inputs_two_state.append(entry)
+        print(f"Prepared {len(inputs_two_state)} structures for two-state minimization." + (f"Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
         with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
-            for _ in track(pool.imap_unordered(minimize_complex_pool, inputs_holo), total=len(inputs_holo), description=f"Running ligand-bound minimization, Step 1 of 2…"):
-                pass
-            for _ in track(pool.imap_unordered(minimize_apo_pool, inputs_apo), total=len(inputs_apo), description=f"Running apo minimization, Step 2 of 2…"):
+            for _ in track(pool.imap_unordered(minimize_two_state, inputs_two_state), total=len(inputs_two_state), description="Running two-state energy minimization…"):
                 pass
     else:
         inputs = []
@@ -105,12 +125,14 @@ def protonate_batch(
                 name = pdb_path.stem
                 out_path = output_dir / (name + (suffix if suffix else "_emin_apo.pdb"))
                 if resume and out_path.exists():
+                    already_complete_count += 1
                     continue
                 apo_template.update({
                     "pdb_path": str(pdb_path),
                     "output_path": str(out_path),
                 })
                 inputs.append(apo_template.copy())
+            print(f"Prepared {len(inputs)} structures for apo minimization." + (f"Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
             with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
                 for _ in track(pool.imap_unordered(minimize_apo_pool, inputs), total=len(inputs), description=f"Running apo energy minimization…"):
                     pass
@@ -119,13 +141,14 @@ def protonate_batch(
                 name = pdb_path.stem
                 out_path = output_dir / (name + (suffix if suffix else "_emin.pdb"))
                 if resume and out_path.exists():
+                    already_complete_count += 1
                     continue
                 complex_template.update({
                     "pdb_path": str(pdb_path),
                     "output_path": str(out_path),
                 })
                 inputs.append(complex_template.copy())
-
+            print(f"Prepared {len(inputs)} structures for holo minimization." + (f"Skipping {already_complete_count} already complete structures due to --resume." if already_complete_count else ""))
             with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
                 for _ in track(pool.imap_unordered(minimize_complex_pool, inputs), total=len(inputs), description=f"Running ligand-bound energy minimization…"):
                     pass
