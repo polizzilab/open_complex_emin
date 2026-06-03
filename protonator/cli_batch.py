@@ -32,6 +32,7 @@ def protonate_batch(
     smiles: str = typer.Argument(..., help="One ligand SMILES string representing all structures in the batch. See protonator/scripts/run_batch.py for a more flexible alternative that allows different ligands per structure."),
     output_dir: Path = typer.Option(Path("batch_emin_output"), "--output-dir", "-o", help="Output directory"),
     apo: bool = typer.Option(False, "--apo", help="Minimise protein only — strip ligand and ignore --smiles"),
+    two_state: bool = typer.Option(False, "--two-state", help="Minimise both apo and holo states (default: off), Overrides --apo if both are set."),
     ph: float = typer.Option(7.4, "--ph", help="pH for protonation state assignment"),
     restraint_k: float = typer.Option(50.0, "--restraint-k", help="Backbone/ligand restraint (kcal/mol/Å²)"),
     tolerance: float = typer.Option(30.0, "--tolerance", help="Minimisation convergence (kJ/mol/nm)"),
@@ -66,38 +67,58 @@ def protonate_batch(
         typer.echo(f"Error: invalid SMILES string: {smiles}", err=True)
         raise typer.Exit(1)
 
-    inputs = []
-    if apo:
+    complex_template = {
+        "smiles": smiles, "ph": ph, "restraint_k": restraint_k,
+        "tolerance": tolerance, "freeze_ligand": freeze_ligand, "sweep_hbonds": sweep_hbonds, "max_iterations": max_iterations,
+    }
+
+    apo_template = {
+        "ph": ph, "restraint_k": restraint_k, "tolerance": tolerance, "max_iterations": max_iterations,
+    }
+
+    if two_state:
+        inputs_apo = []
+        inputs_holo = []
         for pdb_path in all_targets:
             name = pdb_path.stem
-            out_path = output_dir / (name + (suffix if suffix else "_emin_apo.pdb"))
-            inputs.append({
-                "pdb_path": str(pdb_path),
-                "output_path": str(out_path),
-                "ph": ph,
-                "restraint_k": restraint_k,
-                "tolerance": tolerance,
-                "max_iterations": max_iterations
-            })
+            out_path_holo = output_dir / (name + (suffix if suffix else "_emin.pdb"))
+            apo_suffix = Path(suffix).stem + "_apo" + Path(suffix).suffix if suffix else "_emin_apo.pdb"
+            out_path_apo = output_dir / (name + apo_suffix)
+            complex_template["pdb_path"] = str(pdb_path)
+            complex_template["output_path"] = str(out_path_holo)
+            inputs_holo.append(complex_template.copy())
+            apo_template["pdb_path"] = str(pdb_path)
+            apo_template["output_path"] = str(out_path_apo)
+            inputs_apo.append(apo_template.copy())
         with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
-            for _ in track(pool.imap_unordered(minimize_apo_pool, inputs), total=len(inputs), description=f"Running apo energy minimization…"):
+            for _ in track(pool.imap_unordered(minimize_complex_pool, inputs_holo), total=len(inputs_holo), description=f"Running ligand-bound minimization, Step 1 of 2…"):
+                pass
+            for _ in track(pool.imap_unordered(minimize_apo_pool, inputs_apo), total=len(inputs_apo), description=f"Running apo minimization, Step 2 of 2…"):
                 pass
     else:
-        for pdb_path in all_targets:
-            name = pdb_path.stem
-            out_path = output_dir / (name + (suffix if suffix else "_emin.pdb"))
-            inputs.append({
-                "pdb_path": str(pdb_path),
-                "smiles": smiles,
-                "output_path": str(out_path),
-                "ph": ph,
-                "restraint_k": restraint_k,
-                "tolerance": tolerance,
-                "freeze_ligand": freeze_ligand,
-                "sweep_hbonds": sweep_hbonds,
-                "max_iterations": max_iterations,
-            })
+        inputs = []
+        if apo:
+            for pdb_path in all_targets:
+                name = pdb_path.stem
+                out_path = output_dir / (name + (suffix if suffix else "_emin_apo.pdb"))
+                apo_template.update({
+                    "pdb_path": str(pdb_path),
+                    "output_path": str(out_path),
+                })
+                inputs.append(apo_template.copy())
+            with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
+                for _ in track(pool.imap_unordered(minimize_apo_pool, inputs), total=len(inputs), description=f"Running apo energy minimization…"):
+                    pass
+        else:
+            for pdb_path in all_targets:
+                name = pdb_path.stem
+                out_path = output_dir / (name + (suffix if suffix else "_emin.pdb"))
+                complex_template.update({
+                    "pdb_path": str(pdb_path),
+                    "output_path": str(out_path),
+                })
+                inputs.append(complex_template.copy())
 
-        with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
-            for _ in track(pool.imap_unordered(minimize_complex_pool, inputs), total=len(inputs), description=f"Running ligand-bound energy minimization…"):
-                pass
+            with Pool(n_workers, initializer=_init_worker_ff, initargs=(1,)) as pool:
+                for _ in track(pool.imap_unordered(minimize_complex_pool, inputs), total=len(inputs), description=f"Running ligand-bound energy minimization…"):
+                    pass
