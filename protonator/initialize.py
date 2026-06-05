@@ -24,7 +24,9 @@ def _init_worker(threads_per_worker: int) -> None:
     # import time. Even when using the CPU platform exclusively, importing
     # openmm probes all available platforms and allocates a CUDA context per
     # worker process — holding GPU memory for the entire run with 0% utilization.
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    # Force override (not setdefault) so a pre-set CUDA_VISIBLE_DEVICES in the
+    # environment doesn't bypass this.
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     try:
         import ctypes, ctypes.util
