@@ -1,5 +1,7 @@
 """Ligand parameter preparation: GFN2-xTB partial charges + GAFF2 FFXML."""
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
 from dataclasses import dataclass
 
@@ -100,8 +102,9 @@ def build_ligand_mol(
             raise ValueError(f"Could not parse mol file: {mol_source}")
         smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
     elif pdb_ligand_block is not None:
-        # Use the PDB conformer coordinates + SMILES bond orders.
-        pdb_mol = Chem.MolFromPDBBlock(pdb_ligand_block, removeHs=False, sanitize=False)
+
+        # Use the PDB conformer coordinates + SMILES bond orders
+        pdb_mol = Chem.MolFromPDBBlock(pdb_ligand_block)
         if pdb_mol is None:
             raise ValueError("Could not parse ligand PDB block.")
         template = Chem.MolFromSmiles(mol_source)
@@ -109,7 +112,6 @@ def build_ligand_mol(
             raise ValueError(f"Could not parse SMILES: {mol_source}")
         try:
             mol = AllChem.AssignBondOrdersFromTemplate(template, pdb_mol)
-            Chem.SanitizeMol(mol)
         except Exception as e:
             raise ValueError(
                 f"AssignBondOrdersFromTemplate failed — SMILES may not match "

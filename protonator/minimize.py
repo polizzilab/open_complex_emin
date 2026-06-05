@@ -6,8 +6,10 @@ protein sidechains and all hydrogens (including ligand H) are free.
 Implicit solvent: GBn2.
 """
 from __future__ import annotations
+from protonator.initialize import _init_worker
+_init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
-import tempfile
+import io
 from pathlib import Path
 
 import numpy as np
@@ -16,17 +18,24 @@ import openmm.app as app
 import openmm.unit as unit
 
 from .gaff import make_gaff2_generator
-from .ligand import LigandParams, prepare_ligand
+from .ligand import prepare_ligand
 
 _BACKBONE = {"N", "CA", "C", "O", "OXT"}
+
+# Worker-level cached ForceField, set once by _init_worker_ff().
+# _WORKER_FF_HAS_LIG is True when the LIG template was pre-loaded via
+# loadFile (same-ligand batch) — safe to reuse across calls.
+# If False (varying-ligand batch), only apo paths reuse the base FF;
+# holo paths build a fresh FF per call to avoid template cache poisoning.
+_WORKER_FF = None
+_WORKER_FF_HAS_LIG = False
 
 
 def minimize_complex(
     pdb_path: str | Path,
-    ligand_params: LigandParams,
+    smiles: str,
     output_path: str | Path,
     *,
-    recompute_ligand: bool = False,
     restraint_k: float = 50.0,   # kcal/mol/Å²
     ph: float = 7.4,
     tolerance: float = 10.0,     # kJ/mol/nm — convergence criterion
@@ -41,12 +50,12 @@ def minimize_complex(
     ----------
     pdb_path:
         Input PDB.  Chain A = protein (no H), Chain B = ligand (H already placed).
-    ligand_params:
-        Pre-computed per-ligand parameters from prepare_ligand().
+    smiles:
+        Ligand SMILES string.  xTB charges and GAFF2 template are computed from
+        chain B of the input PDB on every call so each structure uses its own
+        AF3 pose and per-structure charges.
     output_path:
         Destination PDB for the relaxed structure.
-    recompute_ligand:
-        If True, recompute xTB charges and GAFF2 template from scratch.
     restraint_k:
         Force constant for harmonic position restraints (kcal/mol/Å²).
     ph:
@@ -62,39 +71,38 @@ def minimize_complex(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if recompute_ligand:
-        ligand_params = prepare_ligand(ligand_params.smiles)
-
     # ------------------------------------------------------------------
-    # 1. Split chains
+    # 1. Split chains; recompute ligand params from chain B so each
+    #    structure uses its own AF3 pose and per-structure xTB charges.
     # ------------------------------------------------------------------
     pdb_text = pdb_path.read_text()
     protein_text = _extract_chain(pdb_text, "A")
     ligand_text  = _extract_chain(pdb_text, "B")
+    ligand_params = prepare_ligand(smiles, pdb_ligand_block=ligand_text)
 
     # ------------------------------------------------------------------
-    # 2. Load protein (no H) + ligand into OpenMM
-    #    Always write the ligand from ligand_params.mol so that explicit H
-    #    atoms are present even when the input PDB has none.  The mol's heavy-
-    #    atom coordinates match the input (loaded from SDF or via
-    #    AssignBondOrdersFromTemplate); H coords come from RDKit AddHs.
+    # 2. Load protein (no H) + ligand into OpenMM.
+    #    ligand_params.mol carries the AF3 heavy-atom coordinates (from
+    #    chain B above) with correct bond orders and H added by AddHs.
     # ------------------------------------------------------------------
-    with tempfile.TemporaryDirectory() as td:
-        prot_path = Path(td) / "protein.pdb"
-        lig_path  = Path(td) / "ligand.pdb"
-        prot_path.write_text(_ensure_oxt(protein_text))
-        lig_path.write_text(_mol_to_ligand_pdb(ligand_params.mol))
-        prot_pdb = app.PDBFile(str(prot_path))
-        lig_pdb  = app.PDBFile(str(lig_path))
+    prot_stream = io.StringIO(_ensure_oxt(protein_text))
+    lig_stream = io.StringIO(_mol_to_ligand_pdb(ligand_params.mol))
+    prot_pdb = app.PDBFile(prot_stream)
+    lig_pdb  = app.PDBFile(lig_stream)
 
     # ------------------------------------------------------------------
     # 3. Build force field (needed before addHydrogens so it can evaluate
     #    H-bond geometry for His tautomer selection)
     # ------------------------------------------------------------------
-    ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
-    ff.registerTemplateGenerator(
-        make_gaff2_generator(ligand_params.gaff_xml)
-    )
+    if _WORKER_FF is not None and _WORKER_FF_HAS_LIG:
+        # FF was pre-built at worker init with the LIG template already loaded
+        # via loadFile — skip the expensive XML reads and GAFF registration.
+        ff = _WORKER_FF
+    else:
+        ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+        ff.registerTemplateGenerator(
+            make_gaff2_generator(ligand_params.gaff_xml, lig_resname="LIG")
+        )
 
     # ------------------------------------------------------------------
     # 4. Combine and add protein hydrogens
@@ -181,12 +189,10 @@ def minimize_apo(
 
     protein_text = _extract_chain(pdb_path.read_text(), "A")
 
-    with tempfile.TemporaryDirectory() as td:
-        prot_path = Path(td) / "protein.pdb"
-        prot_path.write_text(_ensure_oxt(protein_text))
-        prot_pdb = app.PDBFile(str(prot_path))
+    pdb_stream = io.StringIO(_ensure_oxt(protein_text))
+    prot_pdb = app.PDBFile(pdb_stream)
 
-    ff = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+    ff = _WORKER_FF if _WORKER_FF is not None else app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
 
     modeller = app.Modeller(prot_pdb.topology, prot_pdb.positions)
     modeller.addHydrogens(ff, pH=ph)
@@ -221,6 +227,33 @@ def minimize_apo(
     state = sim.context.getState(getPositions=True)
     with open(output_path, "w") as fh:
         app.PDBFile.writeFile(modeller.topology, state.getPositions(), fh)
+
+
+# ---------------------------------------------------------------------------
+# Worker initializer
+# ---------------------------------------------------------------------------
+
+def _init_worker_ff(threads_per_worker: int, gaff_xml: str | None = None) -> None:
+    """
+    Pool initializer: set thread env vars and pre-build the OpenMM ForceField.
+
+    Pass gaff_xml (from LigandParams.gaff_xml) when all batch structures share
+    the same ligand — the LIG template is pre-loaded via ForceField.loadFile()
+    so minimize_complex() can reuse the FF object without reading ff14SB.xml or
+    parsing GAFF output on every call.
+
+    Omit gaff_xml when ligands vary per structure (run_batch.py path): the base
+    FF is still cached for apo minimisations, but minimize_complex() builds a
+    fresh FF per call to avoid template cache poisoning across different ligands.
+    """
+    from protonator.initialize import _init_worker
+    _init_worker(threads_per_worker)
+
+    global _WORKER_FF, _WORKER_FF_HAS_LIG
+    _WORKER_FF = app.ForceField("amber/ff14SB.xml", "implicit/gbn2.xml")
+    if gaff_xml is not None:
+        _WORKER_FF.loadFile(io.StringIO(gaff_xml))
+        _WORKER_FF_HAS_LIG = True
 
 
 # ---------------------------------------------------------------------------

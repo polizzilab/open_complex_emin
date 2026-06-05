@@ -19,12 +19,11 @@ from pathlib import Path
 
 
 def _init_worker(threads_per_worker: int) -> None:
-    """Set thread-count env vars before any library is imported in this worker."""
-    import os
-    t = str(threads_per_worker)
-    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-        os.environ[var] = t
+    """Set thread env vars and pre-build the base OpenMM ForceField for this worker."""
+    from protonator.minimize import _init_worker_ff
+    _init_worker_ff(threads_per_worker)
+    # gaff_xml not passed: ligands may differ per target, so the LIG template
+    # must not be pre-loaded (avoid template cache poisoning across structures).
 
 
 def _process_target(args: tuple) -> tuple[str, str | None]:
@@ -54,10 +53,11 @@ def _process_target(args: tuple) -> tuple[str, str | None]:
         if not sdf.exists():
             return name, f"missing ligand SDF: {sdf}"
         try:
-            from protonator.ligand import prepare_ligand
+            from rdkit import Chem as _Chem
             from protonator.minimize import minimize_complex
-            ligand_params = prepare_ligand(str(sdf), is_file=True)
-            minimize_complex(pdb, ligand_params, out, tolerance=30.0)
+            _mol = _Chem.MolFromMolFile(str(sdf), removeHs=True, sanitize=True)
+            smiles = _Chem.MolToSmiles(_mol)
+            minimize_complex(pdb, smiles, out)
             return name, None
         except Exception:
             return name, traceback.format_exc()
