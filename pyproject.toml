@@ -18,9 +18,13 @@ dependencies = [
     "pint>=0.23",
     "python-constraint>=1.4",
     "rdkit>=2024.3",
+    "scipy>=1.10",
     "tblite>=0.6",
     "tinydb>=4.0",
     "typer>=0.12",
+    # fast track: bunsalyze (H-bond geometry) + its freesasa dep.  bunsalyze is
+    # not on PyPI — installed editable from ~/programs/bunsalyze (see CLAUDE.md).
+    "freesasa>=2.2.1",
 ]
 
 [tool.setuptools.packages.find]
@@ -33,4 +37,5 @@ dev = [
 
 [project.scripts]
 protonator = "protonator.cli:app"
+protonator-fast = "protonator.cli_fast:app"
 protonator_batch = "protonator.cli_batch:app"
