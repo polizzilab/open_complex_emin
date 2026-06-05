@@ -65,13 +65,42 @@ def prepare_ligand(
     (antechamber subprocess via openmmforcefields) run here.  Call this once
     per ligand identity and reuse the result across all structures.
     """
+    mol, smiles = build_ligand_mol(
+        mol_source, is_file=is_file, pdb_ligand_block=pdb_ligand_block)
+
+    charges = _xtb_charges(mol)
+
+    from .gaff import build_gaff2_ffxml
+    gaff_xml = build_gaff2_ffxml(mol, charges)
+
+    return LigandParams(
+        smiles=smiles,
+        charges=charges,
+        mol_block=Chem.MolToMolBlock(mol),
+        gaff_xml=gaff_xml,
+    )
+
+
+def build_ligand_mol(
+    mol_source: str,
+    *,
+    is_file: bool = False,
+    pdb_ligand_block: str | None = None,
+) -> tuple[Chem.Mol, str]:
+    """
+    Parse the ligand into an RDKit mol with explicit H and a 3-D conformer.
+
+    This is the force-field-free part of prepare_ligand(): no xTB charges, no
+    GAFF2.  Used directly by the fast track, and by prepare_ligand() for the
+    rigorous track.  Returns (mol, smiles).
+    """
     if is_file:
         mol = Chem.MolFromMolFile(mol_source, removeHs=False, sanitize=True)
         if mol is None:
             raise ValueError(f"Could not parse mol file: {mol_source}")
         smiles = Chem.MolToSmiles(Chem.RemoveHs(mol))
     elif pdb_ligand_block is not None:
-        # Use the PDB conformer coordinates + SMILES bond orders
+        # Use the PDB conformer coordinates + SMILES bond orders.
         pdb_mol = Chem.MolFromPDBBlock(pdb_ligand_block, removeHs=False, sanitize=False)
         if pdb_mol is None:
             raise ValueError("Could not parse ligand PDB block.")
@@ -86,8 +115,7 @@ def prepare_ligand(
                 f"AssignBondOrdersFromTemplate failed — SMILES may not match "
                 f"the ligand in the PDB: {e}"
             ) from e
-        # Add any missing hydrogens with 3-D coordinates derived from the
-        # existing heavy-atom geometry.
+        # Add any missing hydrogens with 3-D coordinates from the heavy-atom geometry.
         mol = AllChem.AddHs(mol, addCoords=True)
         smiles = mol_source
     else:
@@ -102,17 +130,7 @@ def prepare_ligand(
         AllChem.MMFFOptimizeMolecule(mol)
         smiles = mol_source
 
-    charges = _xtb_charges(mol)
-
-    from .gaff import build_gaff2_ffxml
-    gaff_xml = build_gaff2_ffxml(mol, charges)
-
-    return LigandParams(
-        smiles=smiles,
-        charges=charges,
-        mol_block=Chem.MolToMolBlock(mol),
-        gaff_xml=gaff_xml,
-    )
+    return mol, smiles
 
 
 def _xtb_charges(mol: Chem.Mol) -> list[float]:

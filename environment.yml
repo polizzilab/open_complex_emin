@@ -21,9 +21,13 @@ dependencies:
   - networkx
   - cachetools
   - pint
+  - scipy
   - tinydb
   - typer
   - pytest
   - pip
   - pip:
       - python-constraint
+      # bunsalyze (fast track H-bond geometry) is NOT on PyPI and pulls freesasa.
+      # It is installed separately by setup.sh after the env is created:
+      #   conda activate protonator && ./setup.sh
