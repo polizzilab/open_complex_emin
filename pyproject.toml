@@ -30,6 +30,9 @@ dependencies = [
 [tool.setuptools.packages.find]
 include = ["protonator*"]
 
+[tool.setuptools.package-data]
+protonator = ["data/*.json"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
