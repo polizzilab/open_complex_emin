@@ -2,10 +2,12 @@ from __future__ import annotations
 from protonator.initialize import _init_worker
 _init_worker(1)  # Set thread-count env vars for the main process before any library is imported
 
+import shutil
 from pathlib import Path
 from typing import Optional
 from multiprocessing import Pool
 
+import prody as pr
 import typer
 from rich.progress import track
 from rdkit import Chem, RDLogger
@@ -16,14 +18,27 @@ from protonator.minimize import minimize_complex, minimize_apo, _init_worker_ff
 app = typer.Typer(add_completion=False)
 
 
+def _write_apo_fallback(pdb_path: str, output_path: Path) -> None:
+    ag = pr.parsePDB(pdb_path)
+    pr.writePDB(str(output_path), ag.select('protein'))
+
+
 def minimize_apo_pool(inputs_dict: dict) -> None:
     """Wrapper for minimize_apo to be used in multiprocessing Pool."""
-    minimize_apo(**inputs_dict)
+    try:
+        minimize_apo(**inputs_dict)
+    except Exception as e:
+        print(f"Warning: apo minimization failed for {inputs_dict['pdb_path']} ({e}); writing input structure as fallback.", flush=True)
+        _write_apo_fallback(inputs_dict['pdb_path'], Path(inputs_dict['output_path']))
 
 
 def minimize_complex_pool(inputs_dict: dict) -> None:
     """Wrapper for minimize_complex to be used in multiprocessing Pool."""
-    minimize_complex(**inputs_dict)
+    try:
+        minimize_complex(**inputs_dict)
+    except Exception as e:
+        print(f"Warning: holo minimization failed for {inputs_dict['pdb_path']} ({e}); writing input structure as fallback.", flush=True)
+        shutil.copy2(inputs_dict['pdb_path'], inputs_dict['output_path'])
 
 
 def minimize_two_state(inputs_dict: dict) -> None:
@@ -37,17 +52,25 @@ def minimize_two_state(inputs_dict: dict) -> None:
     holo_inputs = {k: v for k, v in inputs_dict.items() if k != 'apo_output_path'}
 
     if not Path(holo_inputs['output_path']).exists():
-        minimize_complex(**holo_inputs)
+        try:
+            minimize_complex(**holo_inputs)
+        except Exception as e:
+            print(f"Warning: holo minimization failed for {inputs_dict['pdb_path']} ({e}); writing input structure as fallback.", flush=True)
+            shutil.copy2(inputs_dict['pdb_path'], holo_inputs['output_path'])
 
     if not apo_output_path.exists():
-        minimize_apo(
-            pdb_path=inputs_dict['pdb_path'],
-            output_path=apo_output_path,
-            ph=inputs_dict['ph'],
-            restraint_k=inputs_dict['restraint_k'],
-            tolerance=inputs_dict['tolerance'],
-            max_iterations=inputs_dict['max_iterations'],
-        )
+        try:
+            minimize_apo(
+                pdb_path=inputs_dict['pdb_path'],
+                output_path=apo_output_path,
+                ph=inputs_dict['ph'],
+                restraint_k=inputs_dict['restraint_k'],
+                tolerance=inputs_dict['tolerance'],
+                max_iterations=inputs_dict['max_iterations'],
+            )
+        except Exception as e:
+            print(f"Warning: apo minimization failed for {inputs_dict['pdb_path']} ({e}); writing input structure as fallback.", flush=True)
+            _write_apo_fallback(inputs_dict['pdb_path'], apo_output_path)
 
 
 @app.command()
