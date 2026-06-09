@@ -16,9 +16,7 @@
 set -euo pipefail
 
 BUNSALYZE_URL="${BUNSALYZE_URL:-https://github.com/polizzilab/bunsalyze}"
-# Branch carrying the torch-free utils the fast track imports.  Update to the
-# default branch once that work is merged upstream.
-BUNSALYZE_REF="${BUNSALYZE_REF:-remove-torch-dependency}"
+BUNSALYZE_REF="${BUNSALYZE_REF:-main}"
 BUNSALYZE_DIR="${BUNSALYZE_DIR:-$HOME/programs/bunsalyze}"
 
 if ! command -v python >/dev/null 2>&1; then
