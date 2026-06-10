@@ -1,12 +1,19 @@
 """
 Greedy maximization of protein-ligand interface hydrogen bonds.
 
-No force field, no minimization: heavy atoms and non-rotatable groups stay put.
-We only reorient the degrees of freedom that don't move heavy-atom scaffolding:
+No force field, no minimization.  Two classes of degrees of freedom are
+optimized:
 
-  * protein Ser/Thr/Tyr/Cys hydroxyl/thiol and Lys ammonium H  (dihedral sweep)
+  Single greedy pass (_sweep_protein_rotors):
+  * protein Ser/Thr/Tyr/Cys: chi1 rotamer search {-60°, +60°, 180°, current}
+    integrated with H dihedral sweep — both scored together so the chi1
+    decision is made with previously-committed H atoms already in place.
+    A heavy-atom clash gate (< 2.4 Å) filters clashing chi1 candidates.
+  * protein Lys ammonium H                                       (H sweep only)
+
+  Additional passes:
   * ligand terminal polar-H rotors                              (dihedral sweep)
-  * protein Asn/Gln and ligand primary-amide flips             (180 deg)
+  * protein Asn/Gln amide flips                                (180 deg)
   * protein His tautomer  (HID / HIE / HIP)                    (discrete)
 
 Scoring uses bunsalyze.is_valid_hbond verbatim (so as bunsalyze's H-bond
@@ -44,11 +51,31 @@ from bunsalyze.utils.calc_ligand_dons_accs import (
     get_ligand_polar_atoms,
 )
 
-from .geometry import rotate_about_axis
+from .geometry import rotate_about_axis, dihedral
 from .ligand_h import find_rotatable_groups
 from .protonate_h import place_his_ring_h
 
 _MAXD = S_TO_S_HYDROGEN_BOND_DISTANCE_CUTOFF
+
+# Minimum allowed distance (Å) between a chi1-rotated heavy atom and any
+# other heavy atom.  Filters clearly clashing chi1 candidates before H scoring.
+_HEAVY_CLASH_DIST = 2.4
+
+# Chi1 rotor definitions: resname -> donor atom that gains H-bond access via chi1.
+# chi1 = N-CA-CB-Xγ rotation; moves everything bonded to CB except the backbone core.
+_CHI1_ROTORS = {
+    "SER": "OG",
+    "THR": "OG1",
+    "TYR": "OH",
+    "CYS": "SG",
+}
+
+# Backbone + pivot atom names that are fixed during chi1 rotation.
+# Everything else in the residue (beta H, sidechain atoms) rotates.
+_BACKBONE_NAMES = frozenset({
+    "N", "CA", "C", "O", "OXT", "CB",
+    "H", "H1", "H2", "H3", "HA", "HA2", "HA3",
+})
 
 # Protein rotatable polar-H rotors: resname -> (donor, pivot, [H...])
 _PROT_ROTORS = {
@@ -247,10 +274,11 @@ class InterfaceModel:
 
     def optimize(self, step_deg: float = 10.0, sweep_protein: bool = True,
                  sweep_ligand: bool = True, do_flips: bool = True,
-                 his_tautomers: bool = True, allow_hip: bool = False) -> dict:
+                 his_tautomers: bool = True, allow_hip: bool = False,
+                 chi1: bool = True) -> dict:
         report = {"start": self.score()}
         if sweep_protein:
-            self._sweep_protein_rotors(step_deg)
+            self._sweep_protein_rotors(step_deg, chi1=chi1)
         if sweep_ligand:
             self._sweep_ligand_rotors(step_deg)
         if do_flips:
@@ -260,7 +288,58 @@ class InterfaceModel:
         report["final"] = self.score()
         return report
 
-    def _sweep_protein_rotors(self, step_deg: float) -> None:
+    def _sweep_h_dihedral(
+        self,
+        resnum: int, icode: str, donor: str,
+        h0: dict,
+        o: np.ndarray,
+        axis: np.ndarray,
+        donor_elem: str,
+        lig_near: bool,
+        other_h: np.ndarray,
+        acc_coords: np.ndarray,
+        acc_elems: list,
+        angles: np.ndarray,
+    ) -> tuple:
+        """Sweep the H dihedral over all angles and return (best_key, best_theta).
+
+        Ranks each angle by (n_lig, no_clash, geom) — the lexicographic key
+        used throughout this module.  Leaves H coords at the last evaluated
+        angle; caller is responsible for committing best_theta or reverting.
+        """
+        best_key: tuple | None = None
+        best_th = 0.0
+        for th in angles:
+            trial = [rotate_about_axis(c0, o, axis, th) for c0 in h0.values()]
+            for hn, tc in zip(h0, trial):
+                self._set_prot_donor_h(resnum, icode, donor, hn, tc)
+            n_lig = self.score() if lig_near else 0
+            no_clash = True
+            if len(other_h):
+                for tc in trial:
+                    if np.linalg.norm(other_h - tc, axis=1).min() < H_TO_H_CLASH_DIST:
+                        no_clash = False
+                        break
+            geom = _best_donor_hbond_angle(o, donor_elem, trial, acc_coords, acc_elems)
+            cand = (n_lig, no_clash, geom)
+            if best_key is None or cand > best_key:
+                best_key, best_th = cand, th
+        return best_key, best_th
+
+    def _sweep_protein_rotors(self, step_deg: float, chi1: bool = True) -> None:
+        """Greedy per-residue sweep of rotatable polar H dihedrals.
+
+        For Ser/Thr/Tyr/Cys (when chi1=True) the chi1 rotamer search is
+        integrated into this pass: each of the four canonical chi1 angles
+        (current, -60°, +60°, 180°) is tried, and for each the H dihedral is
+        fully swept with the same (n_lig, no_clash, geom) ranking used for
+        H-only residues.  The best (chi1, H) combination is committed.
+
+        Running chi1 and H optimisation in a single greedy pass means each
+        residue's chi1 decision is made with previously-visited residues
+        already at their optimal H positions — the same scoring context the
+        H sweep would have had if chi1 were disabled.
+        """
         angles = np.deg2rad(np.arange(0.0, 360.0, step_deg))
         seen = set()
         for a in self.prot_atoms:
@@ -277,77 +356,156 @@ class InterfaceModel:
             pa = self.p_polar.get((resnum, icode, donor))
             if pa is None:
                 continue
-            h0 = {h.name: h.coord.copy() for h in pa.donor_hydrogens if h.name in hnames}
-            if not h0:
-                continue
-            axis = o - piv
 
-            # Other protein H coords for H-H clash detection.  Built fresh each
-            # residue so it reflects H positions committed earlier in this sweep.
-            other_h_list = [
-                b.coord for b in self.prot_atoms
-                if b.element == "H" and not (b.resnum == resnum and b.icode == icode)
-            ]
-            other_h = np.array(other_h_list, dtype=float) if other_h_list else np.empty((0, 3))
+            # Other protein H for clash detection — rebuilt each residue so it
+            # reflects H positions committed earlier in this sweep.
+            other_h_list = [b.coord for b in self.prot_atoms
+                            if b.element == "H"
+                            and not (b.resnum == resnum and b.icode == icode)]
+            other_h = (np.array(other_h_list, dtype=float)
+                       if other_h_list else np.empty((0, 3)))
 
-            # Acceptors near this donor, for the geometry tie-breaker:
-            #   * protein polar atoms on other residues (backbone/sidechain H-bonds)
-            #   * ligand polar atoms (so interface H-bonds also prefer linear geometry)
-            # Only atoms with acceptor capacity count — donor-only atoms (backbone
-            # amide N, Lys NZ, Arg guanidinium N) can't accept, so steering an H
-            # toward them would be a phantom H-bond.  Gathered once per residue
-            # (acceptor heavy atoms are fixed during the rotor sweep; only H moves).
+            # Acceptors for geometry tie-breaking.  Use CB as the distance
+            # reference (stable across chi1 rotamers) so the list stays valid
+            # when the donor moves during the chi1 loop.
+            _cb = self.prot_xyz.get((resnum, icode, "CB"))
+            ref = _cb if _cb is not None else o
             acc_coords_list: list[np.ndarray] = []
             acc_elems: list[str] = []
             for p in self.protein_polars:
                 if (p.max_acceptor_count > 0
                         and not (p.parent_group_identifier[2] == resnum
                                  and p.parent_group_identifier[3] == icode)
-                        and np.linalg.norm(np.asarray(p.coord) - o) < _MAXD):
+                        and np.linalg.norm(np.asarray(p.coord) - ref) < _MAXD):
                     acc_coords_list.append(np.asarray(p.coord))
                     acc_elems.append(p.element)
             lig_near = False
             for lp in self.ligand_polars:
                 lc = np.asarray(lp.coord)
-                if np.linalg.norm(lc - o) < _MAXD:
+                if np.linalg.norm(lc - ref) < _MAXD:
                     lig_near = True
                     if lp.max_acceptor_count > 0:
                         acc_coords_list.append(lc)
                         acc_elems.append(lp.element)
-            acc_coords = np.array(acc_coords_list, dtype=float) if acc_coords_list else np.empty((0, 3))
-
-            # Greedy choice over all dihedral angles, ranked lexicographically by:
-            #   1. n_lig    — protein-ligand H-bond count (the module's purpose)
-            #   2. no_clash — trial H clear of other protein H (bunsalyze clash dist)
-            #   3. geom     — best D-H...A angle (→180° linear); the geometry the
-            #                 user asked for, and what orients a non-interface
-            #                 rotor toward a protein acceptor instead of leaving
-            #                 it at the arbitrary initial dihedral.
-            # theta=0 (initial placement) is always among the angles, so n_lig
-            # never drops below its starting value: the sweep is non-decreasing.
+            acc_coords = (np.array(acc_coords_list, dtype=float)
+                          if acc_coords_list else np.empty((0, 3)))
             donor_elem = pa.element
-            best_key = None
-            best_th = 0.0
-            for th in angles:
-                trial = [rotate_about_axis(c0, o, axis, th) for c0 in h0.values()]
-                for hn, tc in zip(h0, trial):
-                    self._set_prot_donor_h(resnum, icode, donor, hn, tc)
 
-                n_lig = self.score() if lig_near else 0
+            is_interface = any(
+                p.parent_group_identifier[2] == resnum
+                and p.parent_group_identifier[3] == icode
+                for p in self.interface_polars
+            )
+            if chi1 and resname in _CHI1_ROTORS and is_interface:
+                # ---- chi1 + H sweep ----
+                n_xyz  = self.prot_xyz.get((resnum, icode, "N"))
+                ca_xyz = self.prot_xyz.get((resnum, icode, "CA"))
+                cb_xyz = self.prot_xyz.get((resnum, icode, "CB"))
+                if n_xyz is None or ca_xyz is None or cb_xyz is None:
+                    # Backbone incomplete — fall through to H-only.
+                    pass
+                else:
+                    moving = [(a2.name, a2.element, a2.coord.copy())
+                              for a2 in self.prot_atoms
+                              if a2.resnum == resnum and a2.icode == icode
+                              and a2.name not in _BACKBONE_NAMES]
+                    h0_orig = {h.name: h.coord.copy()
+                               for h in pa.donor_hydrogens if h.name in hnames}
+                    if moving and h0_orig:
+                        orig_state = {nm: c.copy() for nm, _el, c in moving}
+                        moving_heavy_names = [nm for nm, el, _ in moving if el != "H"]
+                        other_heavy_list = (
+                            [a2.coord for a2 in self.prot_atoms
+                             if a2.element != "H"
+                             and not (a2.resnum == resnum and a2.icode == icode)]
+                            + [a2.coord for a2 in self.lig_atoms if a2.element != "H"]
+                        )
+                        all_other_heavy = (np.array(other_heavy_list, dtype=float)
+                                           if other_heavy_list else np.empty((0, 3)))
+                        chi1_axis = cb_xyz - ca_xyz
+                        current_chi1 = dihedral(n_xyz, ca_xyz, cb_xyz, o)
 
-                no_clash = True
-                if len(other_h):
-                    for tc in trial:
-                        if np.linalg.norm(other_h - tc, axis=1).min() < H_TO_H_CLASH_DIST:
-                            no_clash = False
-                            break
+                        overall_best_key: tuple | None = None
+                        overall_best_delta = 0.0
+                        overall_best_th = 0.0
 
-                geom = _best_donor_hbond_angle(o, donor_elem, trial, acc_coords, acc_elems)
+                        for target_chi1 in (current_chi1,
+                                            np.deg2rad(-60.0),
+                                            np.deg2rad(60.0),
+                                            np.deg2rad(180.0)):
+                            delta = target_chi1 - current_chi1
+                            new_pos = {nm: rotate_about_axis(c, cb_xyz, chi1_axis, delta)
+                                       for nm, _el, c in moving}
 
-                cand = (n_lig, no_clash, geom)
-                if best_key is None or cand > best_key:
-                    best_key, best_th = cand, th
+                            # Heavy-atom clash gate.
+                            if moving_heavy_names and len(all_other_heavy):
+                                moved_hvy = np.array(
+                                    [new_pos[nm] for nm in moving_heavy_names], dtype=float
+                                )
+                                if (np.linalg.norm(
+                                        all_other_heavy[:, None] - moved_hvy[None], axis=2
+                                    ).min() < _HEAVY_CLASH_DIST):
+                                    continue
 
+                            new_donor = new_pos[donor]
+                            for nm, c in new_pos.items():
+                                self._set_prot_coord(resnum, icode, nm, c)
+                            self._set_prot_polar_heavy(resnum, icode, donor, new_donor)
+
+                            # H-rotation axis: use the (possibly chi1-moved) pivot.
+                            # pivot is CB for SER/THR/CYS (not in moving); CZ for
+                            # TYR (in moving, so new_pos carries it correctly).
+                            new_piv = new_pos.get(pivot, piv)
+                            new_h_axis = new_donor - new_piv
+                            new_h0 = {nm: new_pos[nm] for nm in hnames if nm in new_pos}
+                            if not new_h0:
+                                for nm, c in orig_state.items():
+                                    self._set_prot_coord(resnum, icode, nm, c)
+                                self._set_prot_polar_heavy(resnum, icode, donor, orig_state[donor])
+                                continue
+
+                            best_key, best_th = self._sweep_h_dihedral(
+                                resnum, icode, donor, new_h0, new_donor, new_h_axis,
+                                donor_elem, lig_near, other_h, acc_coords, acc_elems, angles,
+                            )
+
+                            if overall_best_key is None or best_key > overall_best_key:
+                                overall_best_key = best_key
+                                overall_best_delta = delta
+                                overall_best_th = best_th
+
+                            # Revert for next chi1 candidate.
+                            for nm, c in orig_state.items():
+                                self._set_prot_coord(resnum, icode, nm, c)
+                            self._set_prot_polar_heavy(resnum, icode, donor, orig_state[donor])
+                            for hn, c0 in h0_orig.items():
+                                self._set_prot_donor_h(resnum, icode, donor, hn, c0)
+
+                        # Commit the winning (chi1, H) combination.
+                        best_pos = {nm: rotate_about_axis(c, cb_xyz, chi1_axis, overall_best_delta)
+                                    for nm, _el, c in moving}
+                        best_donor = best_pos[donor]
+                        for nm, c in best_pos.items():
+                            self._set_prot_coord(resnum, icode, nm, c)
+                        self._set_prot_polar_heavy(resnum, icode, donor, best_donor)
+                        best_piv = best_pos.get(pivot, piv)
+                        best_h_axis = best_donor - best_piv
+                        best_h0 = {nm: best_pos[nm] for nm in hnames if nm in best_pos}
+                        for hn, c0 in best_h0.items():
+                            c = rotate_about_axis(c0, best_donor, best_h_axis, overall_best_th)
+                            self._set_prot_donor_h(resnum, icode, donor, hn, c)
+                            self._set_prot_coord(resnum, icode, hn, c)
+                        continue  # next residue
+
+            # ---- H-only sweep (Lys, chi1=False, or backbone-incomplete chi1) ----
+            h0 = {h.name: h.coord.copy() for h in pa.donor_hydrogens if h.name in hnames}
+            if not h0:
+                continue
+            axis = o - piv
+            best_key, best_th = self._sweep_h_dihedral(
+                resnum, icode, donor, h0, o, axis,
+                donor_elem, lig_near, other_h, acc_coords, acc_elems, angles,
+            )
             for hn, c0 in h0.items():
                 c = rotate_about_axis(c0, o, axis, best_th)
                 self._set_prot_donor_h(resnum, icode, donor, hn, c)

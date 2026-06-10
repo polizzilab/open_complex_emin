@@ -22,6 +22,7 @@ def main(
     flips: bool = typer.Option(True, "--flips/--no-flips", help="Evaluate Asn/Gln amide flips"),
     his_tautomers: bool = typer.Option(True, "--his-tautomers/--no-his-tautomers", help="Select His tautomer (HID/HIE) to maximise ligand H-bonds"),
     allow_hip: bool = typer.Option(False, "--allow-hip", help="Allow HIP (doubly-protonated His) as a tautomer candidate (off by default)"),
+    chi1: bool = typer.Option(True, "--chi1/--no-chi1", help="Search chi1 rotamers for interface Ser/Thr/Tyr/Cys before H sweep (on by default)"),
 ) -> None:
     """
     Fast protonation: place polar protein hydrogens geometrically (no OpenMM,
@@ -46,6 +47,7 @@ def main(
         smiles=smiles, ligand_file=ligand_file, apo=apo,
         step_deg=step_deg, sweep_protein=sweep_protein, sweep_ligand=sweep_ligand,
         do_flips=flips, his_tautomers=his_tautomers, allow_hip=allow_hip,
+        chi1=chi1,
     )
     if report.get("mode") == "holo":
         typer.echo(f"Interface H-bonds: {report['start']} → {report['final']}")

@@ -168,6 +168,7 @@ def fast_protonate(
     do_flips: bool = True,
     his_tautomers: bool = True,
     allow_hip: bool = False,
+    chi1: bool = True,
     ncaa_dict: dict | None = None,
 ) -> dict:
     """Run the fast protonation/H-bond-optimization track.  Returns a small
@@ -206,6 +207,7 @@ def fast_protonate(
     report = model.optimize(
         step_deg=step_deg, sweep_protein=sweep_protein, sweep_ligand=sweep_ligand,
         do_flips=do_flips, his_tautomers=his_tautomers, allow_hip=allow_hip,
+        chi1=chi1,
     )
     model.write_pdb(output_path)
     report["mode"] = "holo"
